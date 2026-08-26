@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pandas
+python-multipart
+pydantic
+pydantic-settings
+pymongo
+PyJWT
+bcrypt
+groq
+pytest
+httpx
+email-validator

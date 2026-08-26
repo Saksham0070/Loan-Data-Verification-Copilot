@@ -1,0 +1,19 @@
+[
+  {"rule_id":"REQUIRED_FIELDS_PRESENT","enabled":true,"severity":"HIGH"},
+  {"rule_id":"VALID_DATES","enabled":true,"severity":"HIGH"},
+  {"rule_id":"VALID_NUMERIC_VALUES","enabled":true,"severity":"HIGH"},
+  {"rule_id":"NO_NEGATIVE_PRINCIPAL","enabled":true,"severity":"HIGH"},
+  {"rule_id":"NO_NEGATIVE_BALANCE","enabled":true,"severity":"HIGH"},
+  {"rule_id":"MATURITY_AFTER_ORIGINATION","enabled":true,"severity":"HIGH"},
+  {"rule_id":"BALANCE_NOT_EXCEEDS_PRINCIPAL","enabled":true,"severity":"HIGH"},
+  {"rule_id":"INTEREST_RATE_RANGE","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"VALID_PAYMENT_STATUS","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"PAYMENT_STATUS_CONSISTENCY","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"DUPLICATE_LOAN_ID","enabled":true,"severity":"HIGH"},
+  {"rule_id":"REQUIRED_DOCUMENT_STATUS","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"STALE_RECORD","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"INVALID_STATE_CODE","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"CLOSED_LOAN_POSITIVE_BALANCE","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"SUSPICIOUS_DUPLICATE_BORROWER","enabled":true,"severity":"MEDIUM"},
+  {"rule_id":"CONFLICTING_VALUES","enabled":true,"severity":"HIGH"}
+]
