@@ -1,0 +1,5 @@
+[
+  {"email":"operator@demo.local","name":"Demo Operator","role":"DATA_OPERATOR"},
+  {"email":"reviewer@demo.local","name":"Demo Reviewer","role":"REVIEWER"},
+  {"email":"consumer@demo.local","name":"Demo Consumer","role":"DATA_CONSUMER"}
+]

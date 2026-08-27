@@ -5,7 +5,7 @@ def parse_date(v):
     if isinstance(v,date):return v
     try:return datetime.fromisoformat(str(v).replace("Z","+00:00")).date() if v else None
     except ValueError:return None
-def validate_loan(loan,duplicate=False):
+def validate_loan(loan,duplicate=False,duplicate_borrower_record=False):
     f=[];missing=[x for x in REQUIRED if loan.get(x) in (None,"")]
     if missing:f.append(issue("REQUIRED_FIELDS_PRESENT","Required Fields Present","HIGH","Required fields are missing.",missing,{x:loan.get(x) for x in missing}))
     o,m=parse_date(loan.get("origination_date")),parse_date(loan.get("maturity_date"))
@@ -28,4 +28,5 @@ def validate_loan(loan,duplicate=False):
     updated=parse_date(loan.get("last_updated_at"))
     if updated and (date.today()-updated).days>180:f.append(issue("STALE_RECORD","Stale Record","MEDIUM","Record has not been updated in over 180 days.",["last_updated_at"],{"last_updated_at":str(updated)}))
     if duplicate:f.append(issue("DUPLICATE_LOAN_ID","Duplicate Loan ID","HIGH","Loan ID is duplicated in this upload or a prior upload.",["loan_id"],{"loan_id":loan.get("loan_id")}))
+    if duplicate_borrower_record:f.append(issue("SUSPICIOUS_DUPLICATE_BORROWER","Suspicious Duplicate Borrower","MEDIUM","Borrower, original principal, and origination date match an existing record.",["borrower_id","original_principal","origination_date"],{"borrower_id":loan.get("borrower_id")}))
     return f

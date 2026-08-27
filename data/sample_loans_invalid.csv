@@ -1,0 +1,4 @@
+loan_id,borrower_id,origination_date,maturity_date,original_principal,current_balance,interest_rate,payment_status,days_past_due,borrower_state,document_status
+LN-DEMO-01,BR-DEMO-01,2025-05-01,2024-05-01,100000,125000,8.5,ACTIVE,0,CA,COMPLETE
+LN-DEMO-02,BR-DEMO-02,invalid-date,2028-01-01,-100,200,105,DELINQUENT,0,XX,PENDING
+LN-DEMO-01,BR-DEMO-01,2025-05-01,2028-05-01,100000,25000,7.5,CLOSED,0,CA,COMPLETE

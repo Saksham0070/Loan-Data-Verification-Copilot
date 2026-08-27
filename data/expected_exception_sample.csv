@@ -1,0 +1,8 @@
+loan_id,rule_id,severity,description
+LN-10002,BALANCE_NOT_EXCEEDS_PRINCIPAL,HIGH,Current balance exceeds original principal.
+LN-10003,VALID_DATES,HIGH,Origination and maturity dates must be valid ISO dates.
+LN-10004,NO_NEGATIVE_BALANCE,HIGH,Current balance cannot be negative.
+LN-10005,CLOSED_LOAN_POSITIVE_BALANCE,MEDIUM,A closed loan has a positive balance.
+LN-10006,INVALID_STATE_CODE,MEDIUM,Borrower state must be a two-letter US state code.
+LN-10007,REQUIRED_DOCUMENT_STATUS,MEDIUM,Document status must be COMPLETE.
+LN-10002,DUPLICATE_LOAN_ID,HIGH,Loan ID is duplicated in this upload or a prior upload.

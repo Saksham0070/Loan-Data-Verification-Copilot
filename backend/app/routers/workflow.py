@@ -17,7 +17,9 @@ class Comment(BaseModel):body:str=Field(min_length=1,max_length=2000)
 @router.get("/exceptions")
 def queue(status:str|None=None,severity:str|None=None,search:str|None=None,user=Depends(require_roles("DATA_OPERATOR","REVIEWER","ADMIN")),db=Depends(get_db)):
     q={k:v for k,v in {"status":status,"severity":severity}.items() if v}
-    if search:q["loan_id"]={"$regex":search,"$options":"i"}
+    if search:
+        loan_matches=list(db.loans.find({"$or":[{"loan_id":{"$regex":search,"$options":"i"}},{"borrower_id":{"$regex":search,"$options":"i"}}]},{"loan_id":1}))
+        q["loan_id"]={"$in":[x.get("loan_id","") for x in loan_matches]}
     return [serialize(x) for x in db.exceptions.find(q).sort("created_at",-1).limit(200)]
 @router.post("/exceptions/{exception_id}/claim")
 def claim(exception_id:str,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
@@ -36,18 +38,21 @@ def comments(exception_id:str,user=Depends(require_roles("DATA_OPERATOR","REVIEW
 def loan_detail(loan_id:str,user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
     loan=db.loans.find_one({"loan_id":loan_id})
     if not loan:raise HTTPException(404,"Loan not found")
-    return serialize({"loan":loan,"validation_results":list(db.validation_results.find({"loan_document_id":loan["_id"]})),"exceptions":list(db.exceptions.find({"loan_document_id":loan["_id"]}))})
+    return serialize({"loan":loan,"validation_results":list(db.validation_results.find({"loan_document_id":loan["_id"]})),"exceptions":list(db.exceptions.find({"loan_document_id":loan["_id"]})),"ai_reviews":list(db.ai_reviews.find({"loan_id":loan_id})),"review_decisions":list(db.review_decisions.find({"loan_id":loan_id})),"verified_records":list(db.verified_loans.find({"loan_id":loan_id})),"audit_events":list(db.audit_logs.find({"loan_id":loan_id}).sort("timestamp",1))})
 @router.post("/exceptions/{exception_id}/ai-review",status_code=201)
 def ai_review(exception_id:str,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
     ex=db.exceptions.find_one({"_id":ObjectId(exception_id)})
     if not ex:raise HTTPException(404,"Exception not found")
     s=get_settings()
     if not s.groq_api_key:raise HTTPException(503,"Groq is not configured. Set GROQ_API_KEY on the backend.")
-    loan=db.loans.find_one({"_id":ex["loan_document_id"]});prompt=f"Return ONLY JSON with severity, explanation, suggested_field, suggested_value, confidence, reasoning. Explain this exception; do not approve a loan. Exception: {serialize(ex)} Loan: {serialize(loan)}"
+    loan=db.loans.find_one({"_id":ex["loan_document_id"]});prompt=f"Return ONLY JSON with severity, explanation, suggested_field, suggested_value, confidence, reasoning. Explain this exception; do not approve a loan. Exception: {serialize(ex)} Loan: {serialize(loan)}";audit(db,"AI_REVIEW_REQUESTED",user,ex["loan_id"],"Reviewer requested an AI explanation.",metadata={"exception_id":exception_id})
     try:
         from groq import Groq
         result=json.loads(Groq(api_key=s.groq_api_key).chat.completions.create(model=s.groq_model,messages=[{"role":"system","content":"You are a conservative loan data quality assistant. Never approve records."},{"role":"user","content":prompt}],response_format={"type":"json_object"}).choices[0].message.content)
-    except Exception as err:raise HTTPException(502,"Groq review failed") from err
+    except Exception as err:
+        # Do not leak provider keys or prompts, but return enough context for a
+        # local demo user to distinguish model/configuration failures.
+        raise HTTPException(502,f"Groq review failed ({type(err).__name__}). Check GROQ_MODEL and your Groq project permissions.") from err
     review={"exception_id":ex["_id"],"loan_id":ex["loan_id"],"provider":"groq","model":s.groq_model,"request_type":"EXPLAIN_AND_SUGGEST","prompt_summary":ex["description"],"response":result,"created_at":datetime.now(timezone.utc),"requested_by":user["_id"]};review["_id"]=db.ai_reviews.insert_one(review).inserted_id;audit(db,"AI_RECOMMENDATION_GENERATED",user,ex["loan_id"],"AI recommendation generated.",metadata={"ai_review_id":str(review["_id"])});return serialize(review)
 @router.post("/exceptions/{exception_id}/decision",status_code=201)
 def decide(exception_id:str,p:Decision,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
@@ -72,7 +77,7 @@ def export_verified(user=Depends(require_roles("DATA_CONSUMER","REVIEWER","ADMIN
     for r in records:writer.writerow({"loan_id":r["loan_id"],"record_hash":r["record_hash"],"quality_score":r.get("quality_score",100),**serialize(r.get("canonical_data",{}))})
     audit(db,"VERIFIED_RECORD_EXPORTED",user,None,"Verified records exported.");return StreamingResponse(iter([output.getvalue()]),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=verified_loans.csv"})
 @router.get("/audit/{loan_id}")
-def audit_timeline(loan_id:str,user=Depends(require_roles("DATA_CONSUMER","REVIEWER","ADMIN")),db=Depends(get_db)):
+def audit_timeline(loan_id:str,user=Depends(require_roles("DATA_OPERATOR","DATA_CONSUMER","REVIEWER","ADMIN")),db=Depends(get_db)):
     return [serialize(x) for x in db.audit_logs.find({"loan_id":loan_id}).sort("timestamp",1)]
 @router.get("/dashboard")
 def dashboard(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):

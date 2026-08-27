@@ -38,6 +38,17 @@ def verified_loan(record_id:str,user=Depends(require_roles("DATA_CONSUMER","REVI
 def summary(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
     total=db.loans.count_documents({}); exceptions=db.exceptions.count_documents({});return {"total_loans":total,"exceptions":exceptions,"open_exceptions":db.exceptions.count_documents({"status":{"$in":["OPEN","UNDER_REVIEW"]}}),"verified_loans":db.verified_loans.count_documents({}),"quality_score":round(max(0,100-(exceptions/max(total,1)*100)),1)}
 
+@router.get("/ai/status")
+def ai_status(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN"))):
+    """Return readiness/model metadata without exposing the Groq API key."""
+    from ..config import get_settings
+    settings=get_settings()
+    return {"provider":"groq","model":settings.groq_model,"enabled":bool(settings.groq_api_key)}
+
+@router.get("/dashboard/activity")
+def dashboard_activity(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
+    return serialize({"recent_uploads":list(db.uploads.find().sort("uploaded_at",-1).limit(5)),"recent_exceptions":list(db.exceptions.find().sort("created_at",-1).limit(5)),"recent_verifications":list(db.verified_loans.find().sort("verification_timestamp",-1).limit(5)),"severity_breakdown":{"HIGH":db.exceptions.count_documents({"severity":"HIGH","status":{"$in":["OPEN","UNDER_REVIEW"]}}),"MEDIUM":db.exceptions.count_documents({"severity":"MEDIUM","status":{"$in":["OPEN","UNDER_REVIEW"]}})}})
+
 @router.get("/validation-rules")
 def rules(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","ADMIN"))):
     path=Path(__file__).resolve().parents[3]/"data"/"validation_rules.json"

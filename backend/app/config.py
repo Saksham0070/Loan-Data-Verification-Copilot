@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "development-only-change-me"
     jwt_expiry_minutes: int = 480
     groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "qwen/qwen3.6-27b"
     cors_origins: str = "http://localhost:5173"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 @lru_cache

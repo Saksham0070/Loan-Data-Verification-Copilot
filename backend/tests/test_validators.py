@@ -4,3 +4,7 @@ def loan(**changes):
 def test_valid_loan_passes():assert not validate_loan(loan())
 def test_balance_over_principal_detected():assert "BALANCE_NOT_EXCEEDS_PRINCIPAL" in {x["rule_id"] for x in validate_loan(loan(current_balance=1100))}
 def test_invalid_state_detected():assert "INVALID_STATE_CODE" in {x["rule_id"] for x in validate_loan(loan(borrower_state="XX"))}
+def test_closed_loan_positive_balance_detected():assert "CLOSED_LOAN_POSITIVE_BALANCE" in {x["rule_id"] for x in validate_loan(loan(payment_status="CLOSED"))}
+def test_interest_rate_range_detected():assert "INTEREST_RATE_RANGE" in {x["rule_id"] for x in validate_loan(loan(interest_rate=101))}
+def test_duplicate_borrower_combination_detected():assert "SUSPICIOUS_DUPLICATE_BORROWER" in {x["rule_id"] for x in validate_loan(loan(),duplicate_borrower_record=True)}
+def test_inconsistent_delinquency_detected():assert "PAYMENT_STATUS_CONSISTENCY" in {x["rule_id"] for x in validate_loan(loan(payment_status="DELINQUENT",days_past_due=0))}
