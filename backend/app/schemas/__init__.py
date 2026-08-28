@@ -1,0 +1,1 @@
+"""API schema ownership package."""

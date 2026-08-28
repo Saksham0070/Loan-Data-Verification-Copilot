@@ -18,6 +18,7 @@ def ensure_indexes(db):
     if legacy and legacy.get("unique"):
         db.loans.drop_index("loan_id_1_upload_id_1")
     db.loans.create_index([("loan_id",ASCENDING),("upload_id",ASCENDING),("source_row_number",ASCENDING)],unique=True)
+    db.verified_loans.create_index("loan_document_id",unique=True,sparse=True)
     for c,f in [("loans","borrower_id"),("validation_results","loan_id"),("validation_results","rule_id"),("exceptions","loan_id"),("exceptions","status"),("exceptions","severity"),("ai_reviews","exception_id"),("verified_loans","loan_id"),("audit_logs","loan_id"),("audit_logs","timestamp")]:getattr(db,c).create_index(f)
 def get_db(request:Request):
     if request.app.state.db is None:raise HTTPException(503,"Database is not configured. Set MONGODB_URI on the backend.")
