@@ -1,5 +1,5 @@
 from app.validators import validate_loan
-from app.services import canonical_hash,normalize_with_lineage,quality_from_failures
+from app.services import aggregate_status,canonical_hash,normalize_with_lineage,quality_from_failures
 def loan(**changes):
     x={"loan_id":"LN-1","borrower_id":"BR-1","origination_date":"2024-01-01","maturity_date":"2028-01-01","original_principal":1000.0,"current_balance":800.0,"payment_status":"ACTIVE","borrower_state":"CA","document_status":"COMPLETE"};x.update(changes);return x
 def test_valid_loan_passes():assert not validate_loan(loan())
@@ -36,3 +36,7 @@ def test_all_organizer_example_fields_are_retained_in_canonical_schema():
 def test_quality_only_penalizes_failed_rules_not_passed_rules():
     assert quality_from_failures([{"severity":"HIGH","passed":True},{"severity":"MEDIUM","passed":True}])==100
     assert quality_from_failures([{"severity":"HIGH","passed":False},{"severity":"MEDIUM","passed":False}])==78
+def test_aggregate_status_reflects_blocking_and_review_findings():
+    assert aggregate_status([])=="READY_FOR_VERIFICATION"
+    assert aggregate_status([{"severity":"MEDIUM"}])=="NEEDS_REVIEW"
+    assert aggregate_status([{"severity":"HIGH"}])=="FAILED"

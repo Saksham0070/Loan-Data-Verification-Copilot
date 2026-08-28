@@ -15,6 +15,11 @@ class InsertResult:
         self.inserted_id = inserted_id
 
 
+class InsertManyResult:
+    def __init__(self, inserted_ids):
+        self.inserted_ids = inserted_ids
+
+
 class Collection:
     def __init__(self, documents=None):
         self.documents = documents or []
@@ -49,6 +54,9 @@ class Collection:
         document.setdefault("_id", ObjectId())
         self.documents.append(document)
         return InsertResult(document["_id"])
+
+    def insert_many(self, documents):
+        return InsertManyResult([self.insert_one(document).inserted_id for document in documents])
 
     def update_one(self, query, update):
         document = self.find_one(query)
@@ -150,7 +158,9 @@ def test_only_explicit_human_acceptance_applies_the_stored_ai_suggestion():
     assert db.loans.documents[0]["current_balance"] == 750.0
     assert db.loans.documents[0]["borrower_state"] == "TX"
     assert decision["ai_review_id"] == str(ai_review_id)
-    assert db.audit_logs.documents[-1]["event_type"] == "AI_RECOMMENDATION_ACCEPTED"
+    assert decision["post_edit_validation"]["aggregate_status"] == "READY_FOR_VERIFICATION"
+    assert any(event["event_type"] == "AI_RECOMMENDATION_ACCEPTED" for event in db.audit_logs.documents)
+    assert db.audit_logs.documents[-1]["event_type"] == "POST_EDIT_VALIDATION_EXECUTED"
 
 
 def test_acceptance_without_stored_ai_or_unsafe_edit_is_rejected():
@@ -175,6 +185,7 @@ def test_verified_record_requires_clean_final_validation_and_is_created_once():
 
     assert verified["quality_score"] == 100
     assert len(db.verified_loans.documents) == 1
+    assert db.loans.documents[0]["aggregate_status"] == "VERIFIED"
     assert db.audit_logs.documents[-1]["event_type"] == "VERIFIED_RECORD_CREATED"
     with pytest.raises(HTTPException, match="already has a verified record"):
         workflow.verify(str(exception["_id"]), user, db)

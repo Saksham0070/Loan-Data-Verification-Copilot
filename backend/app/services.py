@@ -1,4 +1,5 @@
 import hashlib,json,re
+from uuid import uuid4
 from datetime import datetime,timezone
 from io import BytesIO
 import pandas as pd
@@ -13,6 +14,32 @@ def quality_from_failures(failures):
     """Score only failed checks; passed historical validation records have no penalty."""
     penalty=sum(QUALITY_PENALTIES.get(item.get("severity"),3) for item in failures if not item.get("passed",False))
     return max(0,100-penalty)
+def aggregate_status(failures):
+    """Loan-level workflow status, distinct from the final human VERIFIED state."""
+    if any(item.get("severity")=="HIGH" for item in failures):return "FAILED"
+    if failures:return "NEEDS_REVIEW"
+    return "READY_FOR_VERIFICATION"
+def revalidate_loan(db,loan,user,reason="Reviewer correction"):
+    """Re-run deterministic checks after an edit and synchronize the exception queue."""
+    duplicate=bool(db.loans.find_one({"loan_id":loan.get("loan_id"),"_id":{"$ne":loan["_id"]}}))
+    combo={"borrower_id":loan.get("borrower_id"),"original_principal":loan.get("original_principal"),"origination_date":loan.get("origination_date"),"_id":{"$ne":loan["_id"]}}
+    duplicate_borrower=all(loan.get(key) not in (None,"") for key in ("borrower_id","original_principal","origination_date")) and bool(db.loans.find_one(combo))
+    failures=configured_results(validate_loan(loan,duplicate,duplicate_borrower));failed_by_rule={item["rule_id"]:item for item in failures};run_id=str(uuid4());evidence=[]
+    for rule_id,rule in RULE_DEFINITIONS.items():
+        failure=failed_by_rule.get(rule_id)
+        evidence.append({**(failure or {"rule_id":rule_id,"rule_name":rule.rule_name,"severity":rule.severity,"passed":True,"message":"Rule passed after revalidation.","affected_fields":[],"actual_values":{}}),"loan_id":loan.get("loan_id"),"loan_document_id":loan["_id"],"upload_id":loan.get("upload_id"),"validation_run_id":run_id,"run_type":"POST_EDIT","timestamp":now()})
+    ids=db.validation_results.insert_many(evidence).inserted_ids;result_id_by_rule={entry["rule_id"]:ids[index] for index,entry in enumerate(evidence)}
+    active=list(db.exceptions.find({"loan_document_id":loan["_id"],"status":{"$in":["OPEN","UNDER_REVIEW"]}}));active_rules={item.get("rule_id") for item in active}
+    for item in active:
+        if item.get("rule_id") not in failed_by_rule:
+            db.exceptions.update_one({"_id":item["_id"]},{"$set":{"status":"AUTO_RESOLVED","updated_at":now()}})
+            audit(db,"EXCEPTION_AUTO_RESOLVED",user,loan.get("loan_id"),"A revalidation confirmed this exception is resolved.",metadata={"exception_id":str(item["_id"]),"validation_run_id":run_id})
+    created=0
+    for failure in failures:
+        if failure["rule_id"] not in active_rules:
+            db.exceptions.insert_one({"loan_id":loan.get("loan_id"),"loan_document_id":loan["_id"],"validation_result_id":result_id_by_rule[failure["rule_id"]],"rule_id":failure["rule_id"],"severity":failure["severity"],"status":"OPEN","title":failure["rule_name"],"description":failure["message"],"affected_fields":failure["affected_fields"],"created_at":now(),"updated_at":now(),"validation_run_id":run_id});created+=1
+    status=aggregate_status(failures);db.loans.update_one({"_id":loan["_id"]},{"$set":{"aggregate_status":status,"last_validated_at":now(),"latest_validation_run_id":run_id,"updated_at":now()}});audit(db,"POST_EDIT_VALIDATION_EXECUTED",user,loan.get("loan_id"),f"{reason}: deterministic rules re-run.",metadata={"validation_run_id":run_id,"aggregate_status":status,"failed_rules":sorted(failed_by_rule),"new_exceptions":created})
+    return {"aggregate_status":status,"failed_rules":sorted(failed_by_rule),"new_exceptions":created,"validation_run_id":run_id}
 HEADER_ALIASES={"loan id":"loan_id","loan number":"loan_id","borrower id":"borrower_id","borrower number":"borrower_id","original principal":"original_principal","original loan amount":"original_principal","loan amount":"original_principal","current balance":"current_balance","outstanding balance":"current_balance","payment status":"payment_status","borrower state":"borrower_state","state":"borrower_state","document status":"document_status","origination date":"origination_date","loan origination date":"origination_date","maturity date":"maturity_date","interest rate":"interest_rate","term months":"term_months","days past due":"days_past_due","last payment date":"last_payment_date","last updated at":"last_updated_at","source system":"source_system"}
 NUMERIC_FIELDS={"original_principal","current_balance","interest_rate","term_months","days_past_due","employment_length"}
 INTEGER_FIELDS={"term_months","days_past_due"}
@@ -91,6 +118,7 @@ def import_csv(db,content,filename,user):
             for failure in failures:
                 if failure["severity"] in {"HIGH","MEDIUM"}:
                     db.exceptions.insert_one({"loan_id":lid,"loan_document_id":docid,"validation_result_id":result_id_by_rule[failure["rule_id"]],"rule_id":failure["rule_id"],"severity":failure["severity"],"status":"OPEN","title":failure["rule_name"],"description":failure["message"],"affected_fields":failure["affected_fields"],"created_at":now(),"updated_at":now()});audit(db,"EXCEPTION_CREATED",user,lid,failure["message"],metadata={"rule_id":failure["rule_id"]});count+=1
+            status=aggregate_status(failures);db.loans.update_one({"_id":docid},{"$set":{"aggregate_status":status,"last_validated_at":now()}})
             if failures:up["rows_with_exceptions"]+=1
             up["rows_success"]+=1
         except Exception as exc:

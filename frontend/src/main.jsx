@@ -13,6 +13,7 @@ const labels = {
   OPEN: "open",
   UNDER_REVIEW: "review",
   CORRECTED: "corrected",
+  AUTO_RESOLVED: "corrected",
   REJECTED: "rejected",
 };
 function App() {
@@ -81,10 +82,10 @@ function App() {
     );
   const nav =
     user.role === "DATA_OPERATOR"
-      ? ["dashboard", "upload", "exceptions", "audit"]
+      ? ["dashboard", "upload", "batches", "exceptions", "audit"]
       : user.role === "DATA_CONSUMER"
-        ? ["dashboard", "verified", "audit"]
-        : ["dashboard", "exceptions", "verified", "audit"];
+        ? ["dashboard", "batches", "verified", "audit"]
+        : ["dashboard", "batches", "exceptions", "verified", "audit"];
   return (
     <div className="app">
       <Sidebar
@@ -140,8 +141,10 @@ function App() {
           <UploadSummary
             result={uploadResult}
             onNext={() => setView("exceptions")}
+            onBatch={() => setView("batches")}
           />
         )}{" "}
+        {view === "batches" && <BatchRecords api={api} setMessage={setMessage} />}{" "}
         {view === "exceptions" && (
           <Exceptions api={api} user={user} setMessage={setMessage} />
         )}{" "}
@@ -370,7 +373,7 @@ function Upload({ api, onDone }) {
     </section>
   );
 }
-function UploadSummary({ result, onNext }) {
+function UploadSummary({ result, onNext, onBatch }) {
   if (!result)
     return (
       <section className="panel">
@@ -408,12 +411,44 @@ function UploadSummary({ result, onNext }) {
         </div>
       )}
       <div className="actions">
+        <button className="secondary" onClick={onBatch}>
+          View batch records
+        </button>
         <button className="primary" onClick={onNext}>
           Open exception queue
         </button>
       </div>
     </section>
   );
+}
+function BatchRecords({ api, setMessage }) {
+  const [uploads, setUploads] = useState([]), [uploadId, setUploadId] = useState(""), [result, setResult] = useState(null), [status, setStatus] = useState(""), [search, setSearch] = useState(""), [page, setPage] = useState(0), [busy, setBusy] = useState(false);
+  const limit = 8;
+  const loadUploads = async () => {
+    try { const rows = await api("/uploads"); setUploads(rows); if (!uploadId && rows[0]?._id) setUploadId(rows[0]._id); }
+    catch (e) { setMessage(e.message); }
+  };
+  const loadRecords = async () => {
+    if (!uploadId) return;
+    setBusy(true);
+    try { const query = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (status) query.set("status", status); if (search) query.set("search", search); setResult(await api(`/uploads/${uploadId}/records?${query.toString()}`)); }
+    catch (e) { setMessage(e.message); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { loadUploads(); }, []);
+  useEffect(() => { loadRecords(); }, [uploadId, status, search, page]);
+  return <section className="panel batch-records">
+    <div className="row"><div><h2>Batch loan records</h2><p className="hint">Normalized records and their current workflow status.</p></div><button className="secondary" disabled={busy} onClick={loadRecords}>Refresh</button></div>
+    <div className="batch-controls">
+      <select value={uploadId} onChange={(e) => { setUploadId(e.target.value); setPage(0); }}><option value="">Select an upload</option>{uploads.map((upload) => <option key={upload._id} value={upload._id}>{upload.filename} · {upload.rows_success}/{upload.rows_total} rows</option>)}</select>
+      <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}><option value="">All statuses</option><option value="READY_FOR_VERIFICATION">Ready for verification</option><option value="NEEDS_REVIEW">Needs review</option><option value="FAILED">Failed</option><option value="VERIFIED">Verified</option></select>
+      <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(0); }} placeholder="Search loan or borrower ID" />
+    </div>
+    {result?.upload && <p className="hint">{result.upload.filename} · {result.pagination.total} matching records</p>}
+    <div className="record-table"><div className="record-head"><span>Loan</span><span>Borrower</span><span>Status</span><span>Source row</span></div>{(result?.items || []).map((loan) => <div className="record-item" key={loan._id}><b>{loan.loan_id || "Missing loan ID"}</b><span>{loan.borrower_id || "—"}</span><span className={`status ${String(loan.aggregate_status || "NEEDS_REVIEW").toLowerCase()}`}>{String(loan.aggregate_status || "NEEDS_REVIEW").replaceAll("_", " ")}</span><span>#{loan.source_row_number || "—"}</span></div>)}</div>
+    {result && !result.items?.length && <p className="hint">No records match this filter.</p>}
+    <div className="pagination"><button className="secondary" disabled={page === 0 || busy} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page + 1}</span><button className="secondary" disabled={!result?.pagination?.has_more || busy} onClick={() => setPage((value) => value + 1)}>Next</button></div>
+  </section>;
 }
 function Exceptions({ api, user, setMessage }) {
   const [rows, setRows] = useState([]),
@@ -675,6 +710,14 @@ function Exceptions({ api, user, setMessage }) {
                         ? "The reviewer rejected this exception."
                         : `${humanDecision.field} was set to ${String(humanDecision.final_value)} by the reviewer.`}
                     </p>
+                    {humanDecision.post_edit_validation && (
+                      <p className="revalidation-result">
+                        Revalidation: <b>{humanDecision.post_edit_validation.aggregate_status.replaceAll("_", " ")}</b>
+                        {humanDecision.post_edit_validation.failed_rules?.length
+                          ? ` · remaining rules: ${humanDecision.post_edit_validation.failed_rules.join(", ")}`
+                          : " · all deterministic checks now pass."}
+                      </p>
+                    )}
                     <small>This decision, reviewer comment, and any linked AI recommendation are in the audit trail.</small>
                   </div>
                 )}

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from ..database import get_db
 from ..security import require_roles
-from ..services import audit, normalize_row
+from ..services import audit, normalize_row, quality_from_failures
 from ..utils import serialize
 
 router=APIRouter(tags=["Records, sources, and AI utilities"])
@@ -24,6 +24,18 @@ def _exception(db, loan, rule_id, title, description, fields, user):
 def list_loans(limit:int=100,loan_id:str|None=None,borrower_id:str|None=None,user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
     q={k:v for k,v in {"loan_id":loan_id,"borrower_id":borrower_id}.items() if v};return [serialize(x) for x in db.loans.find(q,{"raw_csv_row":0}).sort("created_at",-1).limit(min(limit,500))]
 
+@router.get("/uploads/{upload_id}/records")
+def batch_records(upload_id:str,limit:int=20,offset:int=0,status:str|None=None,search:str|None=None,user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
+    try:upload_object_id=ObjectId(upload_id)
+    except Exception as exc:raise HTTPException(422,"Invalid upload ID") from exc
+    upload=db.uploads.find_one({"_id":upload_object_id})
+    if not upload:raise HTTPException(404,"Upload not found")
+    query={"upload_id":upload_object_id}
+    if status:query["aggregate_status"]=status
+    if search:query["$or"]=[{"loan_id":{"$regex":search,"$options":"i"}},{"borrower_id":{"$regex":search,"$options":"i"}}]
+    safe_limit=min(max(limit,1),100);safe_offset=max(offset,0);total=db.loans.count_documents(query);items=list(db.loans.find(query,{"raw_csv_row":0,"normalization_metadata":0}).sort("source_row_number",1).skip(safe_offset).limit(safe_limit))
+    return serialize({"upload":{"_id":upload["_id"],"filename":upload.get("filename"),"source_type":upload.get("source_type"),"uploaded_at":upload.get("uploaded_at"),"rows_total":upload.get("rows_total")},"items":items,"pagination":{"total":total,"limit":safe_limit,"offset":safe_offset,"has_more":safe_offset+len(items)<total}})
+
 @router.get("/verified-loans")
 def verified_loans(user=Depends(require_roles("DATA_CONSUMER","REVIEWER","ADMIN")),db=Depends(get_db)):
     return [serialize(x) for x in db.verified_loans.find().sort("verification_timestamp",-1).limit(200)]
@@ -36,7 +48,10 @@ def verified_loan(record_id:str,user=Depends(require_roles("DATA_CONSUMER","REVI
 
 @router.get("/summary")
 def summary(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
-    total=db.loans.count_documents({}); exceptions=db.exceptions.count_documents({});return {"total_loans":total,"exceptions":exceptions,"open_exceptions":db.exceptions.count_documents({"status":{"$in":["OPEN","UNDER_REVIEW"]}}),"verified_loans":db.verified_loans.count_documents({}),"quality_score":round(max(0,100-(exceptions/max(total,1)*100)),1)}
+    loans=list(db.loans.find({}, {"_id":1}));total=len(loans);exceptions=db.exceptions.count_documents({});active=list(db.exceptions.find({"status":{"$in":["OPEN","UNDER_REVIEW"]}}));by_loan={str(loan["_id"]):[] for loan in loans}
+    for item in active:by_loan.setdefault(str(item.get("loan_document_id")),[]).append(item)
+    quality=round(sum(quality_from_failures(by_loan.get(str(loan["_id"]),[])) for loan in loans)/total,1) if total else 100.0
+    return {"total_loans":total,"exceptions":exceptions,"open_exceptions":len(active),"verified_loans":db.verified_loans.count_documents({}),"quality_score":quality}
 
 @router.get("/ai/status")
 def ai_status(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN"))):
