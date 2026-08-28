@@ -36,6 +36,15 @@ def batch_records(upload_id:str,limit:int=20,offset:int=0,status:str|None=None,s
     safe_limit=min(max(limit,1),100);safe_offset=max(offset,0);total=db.loans.count_documents(query);items=list(db.loans.find(query,{"raw_csv_row":0,"normalization_metadata":0}).sort("source_row_number",1).skip(safe_offset).limit(safe_limit))
     return serialize({"upload":{"_id":upload["_id"],"filename":upload.get("filename"),"source_type":upload.get("source_type"),"uploaded_at":upload.get("uploaded_at"),"rows_total":upload.get("rows_total")},"items":items,"pagination":{"total":total,"limit":safe_limit,"offset":safe_offset,"has_more":safe_offset+len(items)<total}})
 
+@router.get("/uploads/{upload_id}/exceptions")
+def batch_exceptions(upload_id:str,limit:int=50,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
+    """Return a reviewable batch slice for the AI summary workbench."""
+    try:upload_object_id=ObjectId(upload_id)
+    except Exception as exc:raise HTTPException(422,"Invalid upload ID") from exc
+    loan_ids=[item["_id"] for item in db.loans.find({"upload_id":upload_object_id},{"_id":1})]
+    if not loan_ids:return []
+    return [serialize(item) for item in db.exceptions.find({"loan_document_id":{"$in":loan_ids},"status":{"$in":["OPEN","UNDER_REVIEW","CORRECTION_REQUESTED"]}}).sort("created_at",-1).limit(min(max(limit,1),50))]
+
 @router.get("/verified-loans")
 def verified_loans(user=Depends(require_roles("DATA_CONSUMER","REVIEWER","ADMIN")),db=Depends(get_db)):
     return [serialize(x) for x in db.verified_loans.find().sort("verification_timestamp",-1).limit(200)]
@@ -48,7 +57,7 @@ def verified_loan(record_id:str,user=Depends(require_roles("DATA_CONSUMER","REVI
 
 @router.get("/summary")
 def summary(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
-    loans=list(db.loans.find({}, {"_id":1}));total=len(loans);exceptions=db.exceptions.count_documents({});active=list(db.exceptions.find({"status":{"$in":["OPEN","UNDER_REVIEW"]}}));by_loan={str(loan["_id"]):[] for loan in loans}
+    loans=list(db.loans.find({}, {"_id":1}));total=len(loans);exceptions=db.exceptions.count_documents({});active=list(db.exceptions.find({"status":{"$in":["OPEN","UNDER_REVIEW","CORRECTION_REQUESTED"]}}));by_loan={str(loan["_id"]):[] for loan in loans}
     for item in active:by_loan.setdefault(str(item.get("loan_document_id")),[]).append(item)
     quality=round(sum(quality_from_failures(by_loan.get(str(loan["_id"]),[])) for loan in loans)/total,1) if total else 100.0
     return {"total_loans":total,"exceptions":exceptions,"open_exceptions":len(active),"verified_loans":db.verified_loans.count_documents({}),"quality_score":quality}
@@ -62,7 +71,8 @@ def ai_status(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUM
 
 @router.get("/dashboard/activity")
 def dashboard_activity(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","DATA_CONSUMER","ADMIN")),db=Depends(get_db)):
-    return serialize({"recent_uploads":list(db.uploads.find().sort("uploaded_at",-1).limit(5)),"recent_exceptions":list(db.exceptions.find().sort("created_at",-1).limit(5)),"recent_verifications":list(db.verified_loans.find().sort("verification_timestamp",-1).limit(5)),"severity_breakdown":{"HIGH":db.exceptions.count_documents({"severity":"HIGH","status":{"$in":["OPEN","UNDER_REVIEW"]}}),"MEDIUM":db.exceptions.count_documents({"severity":"MEDIUM","status":{"$in":["OPEN","UNDER_REVIEW"]}})}})
+    active_statuses=["OPEN","UNDER_REVIEW","CORRECTION_REQUESTED"]
+    return serialize({"recent_uploads":list(db.uploads.find().sort("uploaded_at",-1).limit(5)),"recent_exceptions":list(db.exceptions.find().sort("created_at",-1).limit(5)),"recent_verifications":list(db.verified_loans.find().sort("verification_timestamp",-1).limit(5)),"severity_breakdown":{"HIGH":db.exceptions.count_documents({"severity":"HIGH","status":{"$in":active_statuses}}),"MEDIUM":db.exceptions.count_documents({"severity":"MEDIUM","status":{"$in":active_statuses}}),"CORRECTION_REQUESTED":db.exceptions.count_documents({"status":"CORRECTION_REQUESTED"})}})
 
 @router.get("/validation-rules")
 def rules(user=Depends(require_roles("DATA_OPERATOR","REVIEWER","ADMIN"))):
@@ -75,8 +85,8 @@ async def secondary_upload(source_type:str, file:UploadFile=File(...), user=Depe
     try: frame=pd.read_csv(BytesIO(await file.read()))
     except Exception as exc:raise HTTPException(422,"Unable to parse CSV") from exc
     upload={"filename":file.filename,"uploaded_by":user["_id"],"uploaded_at":datetime.now(timezone.utc),"status":"COMPLETED","source_type":source_type,"rows_total":len(frame),"rows_success":0,"rows_failed":0,"validation_status":"COMPLETED"};upload["_id"]=db.uploads.insert_one(upload).inserted_id; conflicts=0
-    for _,series in frame.iterrows():
-        row=normalize_row({str(k):(None if pd.isna(v) else (v.item() if hasattr(v,"item") else v)) for k,v in series.to_dict().items()});loan_id=str(row.get("loan_id") or "");db.source_records.insert_one({"upload_id":upload["_id"],"source_type":source_type,"loan_id":loan_id,"raw_row":row,"created_at":datetime.now(timezone.utc)})
+    for source_row_number,(_,series) in enumerate(frame.iterrows(),start=1):
+        row=normalize_row({str(k):(None if pd.isna(v) else (v.item() if hasattr(v,"item") else v)) for k,v in series.to_dict().items()});loan_id=str(row.get("loan_id") or "");db.source_records.insert_one({"upload_id":upload["_id"],"source_type":source_type,"loan_id":loan_id,"source_row_number":source_row_number,"raw_row":row,"created_at":datetime.now(timezone.utc)})
         loan=db.loans.find_one({"loan_id":loan_id})
         if loan:
             fields=("document_status",) if source_type=="DOCUMENT_MANIFEST" else ("current_balance","payment_status","last_updated_at")
@@ -96,18 +106,18 @@ def _groq_or_503():
 
 @router.post("/ai/batch-summary")
 def batch_summary(payload:BatchRequest,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
-    s=_groq_or_503(); exceptions=[serialize(x) for x in db.exceptions.find({"_id":{"$in":[ObjectId(x) for x in payload.exception_ids]}})]
+    s=_groq_or_503(); exceptions=[serialize(x) for x in db.exceptions.find({"_id":{"$in":[ObjectId(x) for x in payload.exception_ids]}})];system_prompt="Summarize loan data-quality exceptions. Do not approve records."
     try:
         from groq import Groq
-        text=Groq(api_key=s.groq_api_key).chat.completions.create(model=s.groq_model,messages=[{"role":"system","content":"Summarize loan data-quality exceptions. Do not approve records."},{"role":"user","content":json.dumps(exceptions)}]).choices[0].message.content
+        text=Groq(api_key=s.groq_api_key).chat.completions.create(model=s.groq_model,messages=[{"role":"system","content":system_prompt},{"role":"user","content":json.dumps(exceptions)}]).choices[0].message.content
     except Exception as exc:raise HTTPException(502,"Groq request failed") from exc
-    audit(db,"AI_RECOMMENDATION_GENERATED",user,None,"AI batch exception summary generated.");return {"summary":text,"exception_count":len(exceptions),"model":s.groq_model}
+    created_at=datetime.now(timezone.utc);audit(db,"AI_BATCH_SUMMARY_GENERATED",user,None,"AI batch exception summary generated; no loan data was changed.",metadata={"provider":"groq","model":s.groq_model,"exception_count":len(exceptions),"prompt_summary":"Batch exception summary"});return {"summary":text,"exception_count":len(exceptions),"provider":"groq","model":s.groq_model,"created_at":created_at,"prompt_summary":"Batch exception summary"}
 
 @router.post("/ai/generate-rule")
 def generate_rule(payload:NaturalLanguageRule,user=Depends(require_roles("REVIEWER","ADMIN")),db=Depends(get_db)):
-    s=_groq_or_503()
+    s=_groq_or_503();system_prompt="Return a proposed JSON validation rule and pytest test outline. This is a suggestion only; do not change data or code."
     try:
         from groq import Groq
-        text=Groq(api_key=s.groq_api_key).chat.completions.create(model=s.groq_model,messages=[{"role":"system","content":"Return a proposed JSON validation rule and pytest test outline. This is a suggestion only; do not change data or code."},{"role":"user","content":payload.description}]).choices[0].message.content
+        text=Groq(api_key=s.groq_api_key).chat.completions.create(model=s.groq_model,messages=[{"role":"system","content":system_prompt},{"role":"user","content":payload.description}]).choices[0].message.content
     except Exception as exc:raise HTTPException(502,"Groq request failed") from exc
-    audit(db,"AI_RULE_SUGGESTION_GENERATED",user,None,"AI validation-rule suggestion generated.");return {"proposal":text,"model":s.groq_model}
+    created_at=datetime.now(timezone.utc);audit(db,"AI_RULE_SUGGESTION_GENERATED",user,None,"AI validation-rule suggestion generated; no rule or data was changed.",metadata={"provider":"groq","model":s.groq_model,"prompt_summary":payload.description});return {"proposal":text,"provider":"groq","model":s.groq_model,"created_at":created_at,"prompt_summary":payload.description}

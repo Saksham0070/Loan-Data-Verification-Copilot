@@ -1,5 +1,6 @@
 from app.validators import validate_loan
-from app.services import aggregate_status,canonical_hash,normalize_with_lineage,quality_from_failures
+from app.schemas import NormalizedLoanRecord,normalized_schema_errors
+from app.services import aggregate_status,canonical_hash,combined_validation_failures,normalize_with_lineage,quality_from_failures
 def loan(**changes):
     x={"loan_id":"LN-1","borrower_id":"BR-1","origination_date":"2024-01-01","maturity_date":"2028-01-01","original_principal":1000.0,"current_balance":800.0,"payment_status":"ACTIVE","borrower_state":"CA","document_status":"COMPLETE"};x.update(changes);return x
 def test_valid_loan_passes():assert not validate_loan(loan())
@@ -40,3 +41,8 @@ def test_aggregate_status_reflects_blocking_and_review_findings():
     assert aggregate_status([])=="READY_FOR_VERIFICATION"
     assert aggregate_status([{"severity":"MEDIUM"}])=="NEEDS_REVIEW"
     assert aggregate_status([{"severity":"HIGH"}])=="FAILED"
+def test_typed_normalized_schema_accepts_clean_canonical_record_and_reports_invalid_type():
+    NormalizedLoanRecord.model_validate(loan())
+    errors=normalized_schema_errors(loan(original_principal="not-a-number"))
+    assert errors[0]["field"]=="original_principal"
+    assert "NORMALIZED_SCHEMA_VALID" in {item["rule_id"] for item in combined_validation_failures(loan(original_principal="not-a-number"))}

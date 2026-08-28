@@ -9,6 +9,7 @@ class RuleDefinition:
     description: str
 
 RULE_DEFINITIONS = {
+    "NORMALIZED_SCHEMA_VALID": RuleDefinition("NORMALIZED_SCHEMA_VALID", "Normalized Schema Valid", "HIGH", "The canonical record must satisfy the internal typed loan schema."),
     "REQUIRED_FIELDS_PRESENT": RuleDefinition("REQUIRED_FIELDS_PRESENT", "Required Fields Present", "HIGH", "Required loan fields must be populated."),
     "VALID_DATES": RuleDefinition("VALID_DATES", "Valid Dates", "HIGH", "Date values must use valid ISO dates."),
     "VALID_NUMERIC_VALUES": RuleDefinition("VALID_NUMERIC_VALUES", "Valid Numeric Values", "HIGH", "Numeric loan fields must be numeric."),

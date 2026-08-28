@@ -1,4 +1,5 @@
 [
+  {"rule_id":"NORMALIZED_SCHEMA_VALID","enabled":true,"severity":"HIGH"},
   {"rule_id":"REQUIRED_FIELDS_PRESENT","enabled":true,"severity":"HIGH"},
   {"rule_id":"VALID_DATES","enabled":true,"severity":"HIGH"},
   {"rule_id":"VALID_NUMERIC_VALUES","enabled":true,"severity":"HIGH"},

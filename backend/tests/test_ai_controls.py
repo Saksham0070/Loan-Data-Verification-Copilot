@@ -73,6 +73,7 @@ class Database:
         self.validation_results = Collection()
         self.verified_loans = Collection()
         self.audit_logs = Collection()
+        self.source_records = Collection()
 
 
 def make_database():
@@ -130,6 +131,29 @@ def test_ai_recommendation_is_logged_but_never_changes_loan(monkeypatch):
     assert generated["metadata"]["suggested_value"] == 750.0
 
 
+def test_conflict_ai_review_stores_side_by_side_source_evidence(monkeypatch):
+    db, exception, _ = make_database()
+    exception["rule_id"] = "CONFLICTING_VALUES"
+    db.source_records.insert_one({"loan_id": "LN-AI-1", "source_type": "SERVICER_UPDATE", "source_row_number": 2, "raw_row": {"current_balance": 750.0, "last_updated_at": "2026-08-01"}})
+    response = {"severity": "HIGH", "explanation": "The servicing update is newer.", "suggested_field": "current_balance", "suggested_value": 750.0, "confidence": "HIGH", "recommended_source": "SERVICER_UPDATE", "comparison_reasoning": "It has the newer update timestamp."}
+
+    class FakeGroq:
+        def __init__(self, **_):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **__: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(response)))])))
+
+    module = types.ModuleType("groq")
+    module.Groq = FakeGroq
+    monkeypatch.setitem(sys.modules, "groq", module)
+    monkeypatch.setattr(workflow, "get_settings", lambda: SimpleNamespace(groq_api_key="test-key", groq_model="test-model"))
+
+    review = workflow.ai_review(str(exception["_id"]), {"_id": ObjectId()}, db)
+
+    assert len(review["source_comparison"]) == 2
+    assert review["source_comparison"][1]["values"]["current_balance"] == 750.0
+    assert review["response"]["recommended_source"] == "SERVICER_UPDATE"
+    assert "SERVICER_UPDATE" in review["prompt"]
+
+
 def test_only_explicit_human_acceptance_applies_the_stored_ai_suggestion():
     db, exception, loan = make_database()
     loan["borrower_state"] = "TX"
@@ -174,6 +198,25 @@ def test_acceptance_without_stored_ai_or_unsafe_edit_is_rejected():
             user,
             db,
         )
+
+
+def test_request_correction_preserves_loan_and_blocks_verification():
+    db, exception, loan = make_database()
+    user = {"_id": ObjectId()}
+
+    decision = workflow.decide(
+        str(exception["_id"]),
+        workflow.Decision(decision="REQUEST_CORRECTION", comment="Please correct the servicing file."),
+        user,
+        db,
+    )
+
+    assert decision["decision"] == "REQUEST_CORRECTION"
+    assert db.exceptions.documents[0]["status"] == "CORRECTION_REQUESTED"
+    assert loan["current_balance"] == 800.0
+    assert any(event["event_type"] == "CORRECTION_REQUESTED" for event in db.audit_logs.documents)
+    with pytest.raises(HTTPException, match="Resolve every open exception"):
+        workflow.verify(str(exception["_id"]), user, db)
 
 
 def test_verified_record_requires_clean_final_validation_and_is_created_once():

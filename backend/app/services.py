@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from pathlib import Path
 from .utils import serialize
 from .validators import RULE_DEFINITIONS,validate_loan
+from .schemas import normalized_schema_errors
 def now():return datetime.now(timezone.utc)
 def audit(db,event,user,loan_id,detail,old_value=None,new_value=None,metadata=None):db.audit_logs.insert_one({"event_type":event,"timestamp":now(),"user_id":user.get("_id") if user else None,"loan_id":loan_id,"action_detail":detail,"old_value":old_value,"new_value":new_value,"metadata":metadata or {}})
 QUALITY_PENALTIES={"HIGH":15,"MEDIUM":7,"LOW":3}
@@ -19,17 +20,30 @@ def aggregate_status(failures):
     if any(item.get("severity")=="HIGH" for item in failures):return "FAILED"
     if failures:return "NEEDS_REVIEW"
     return "READY_FOR_VERIFICATION"
+
+def schema_validation_failure(loan):
+    """Convert canonical-schema type errors into a normal validation finding."""
+    errors=normalized_schema_errors(loan)
+    if not errors:return None
+    return {"rule_id":"NORMALIZED_SCHEMA_VALID","rule_name":"Normalized Schema Valid","severity":"HIGH","passed":False,"message":"The normalized canonical record has invalid field types.","affected_fields":sorted({item["field"] for item in errors}),"actual_values":{"schema_errors":errors}}
+
+def combined_validation_failures(loan,duplicate=False,duplicate_borrower_record=False):
+    """Use the typed schema and deterministic business rules together."""
+    failures=list(validate_loan(loan,duplicate,duplicate_borrower_record))
+    schema_failure=schema_validation_failure(loan)
+    if schema_failure:failures.insert(0,schema_failure)
+    return configured_results(failures)
 def revalidate_loan(db,loan,user,reason="Reviewer correction"):
     """Re-run deterministic checks after an edit and synchronize the exception queue."""
     duplicate=bool(db.loans.find_one({"loan_id":loan.get("loan_id"),"_id":{"$ne":loan["_id"]}}))
     combo={"borrower_id":loan.get("borrower_id"),"original_principal":loan.get("original_principal"),"origination_date":loan.get("origination_date"),"_id":{"$ne":loan["_id"]}}
     duplicate_borrower=all(loan.get(key) not in (None,"") for key in ("borrower_id","original_principal","origination_date")) and bool(db.loans.find_one(combo))
-    failures=configured_results(validate_loan(loan,duplicate,duplicate_borrower));failed_by_rule={item["rule_id"]:item for item in failures};run_id=str(uuid4());evidence=[]
+    failures=combined_validation_failures(loan,duplicate,duplicate_borrower);failed_by_rule={item["rule_id"]:item for item in failures};run_id=str(uuid4());evidence=[]
     for rule_id,rule in RULE_DEFINITIONS.items():
         failure=failed_by_rule.get(rule_id)
         evidence.append({**(failure or {"rule_id":rule_id,"rule_name":rule.rule_name,"severity":rule.severity,"passed":True,"message":"Rule passed after revalidation.","affected_fields":[],"actual_values":{}}),"loan_id":loan.get("loan_id"),"loan_document_id":loan["_id"],"upload_id":loan.get("upload_id"),"validation_run_id":run_id,"run_type":"POST_EDIT","timestamp":now()})
     ids=db.validation_results.insert_many(evidence).inserted_ids;result_id_by_rule={entry["rule_id"]:ids[index] for index,entry in enumerate(evidence)}
-    active=list(db.exceptions.find({"loan_document_id":loan["_id"],"status":{"$in":["OPEN","UNDER_REVIEW"]}}));active_rules={item.get("rule_id") for item in active}
+    active=list(db.exceptions.find({"loan_document_id":loan["_id"],"status":{"$in":["OPEN","UNDER_REVIEW","CORRECTION_REQUESTED"]}}));active_rules={item.get("rule_id") for item in active}
     for item in active:
         if item.get("rule_id") not in failed_by_rule:
             db.exceptions.update_one({"_id":item["_id"]},{"$set":{"status":"AUTO_RESOLVED","updated_at":now()}})
@@ -108,7 +122,11 @@ def import_csv(db,content,filename,user):
         # storing both the raw source row and normalized record in MongoDB.
         try:
             raw={str(k):(None if pd.isna(v) else (v.item() if hasattr(v,"item") else v)) for k,v in s.to_dict().items()};loan,normalization_changes=normalize_with_lineage(raw);lid=str(loan.get("loan_id") or "");dup=lid in seen or (bool(lid) and bool(db.loans.find_one({"loan_id":lid})));combo={"borrower_id":loan.get("borrower_id"),"original_principal":loan.get("original_principal"),"origination_date":loan.get("origination_date")};duplicate_borrower=all(v not in (None,"") for v in combo.values()) and bool(db.loans.find_one(combo));seen.add(lid);normalized_at=now();loan.update({"upload_id":uid,"source_row_number":row_number,"raw_csv_row":raw,"normalization_metadata":{"version":"1.0","normalized_at":normalized_at,"changes":normalization_changes},"source_system":loan.get("source_system") or "CSV_UPLOAD","ingestion_source_type":"CSV_UPLOAD","created_at":normalized_at,"updated_at":normalized_at});docid=db.loans.insert_one(loan).inserted_id;audit(db,"LOAN_NORMALIZED",user,lid,"Raw CSV row normalized into the canonical loan schema.",metadata={"source_row_number":row_number,"normalization_version":"1.0","changes":normalization_changes});audit(db,"LOAN_IMPORTED",user,lid,"Loan row imported from CSV.")
-            failures=configured_results(validate_loan(loan,dup,duplicate_borrower));failed_ids={f["rule_id"] for f in failures}
+            schema_errors=normalized_schema_errors(loan);loan["normalization_metadata"]["schema_validation_errors"]=schema_errors
+            db.loans.update_one({"_id":docid},{"$set":{"normalization_metadata":loan["normalization_metadata"]}})
+            if schema_errors:audit(db,"NORMALIZED_SCHEMA_VALIDATION_FAILED",user,lid,"Canonical schema validation found invalid normalized field types.",metadata={"source_row_number":row_number,"schema_errors":schema_errors})
+            else:audit(db,"NORMALIZED_SCHEMA_VALIDATED",user,lid,"Canonical record satisfied the typed internal schema.",metadata={"source_row_number":row_number})
+            failures=combined_validation_failures(loan,dup,duplicate_borrower);failed_ids={f["rule_id"] for f in failures}
             evidence=[]
             for rule_id,rule in RULE_DEFINITIONS.items():
                 failure=next((x for x in failures if x["rule_id"]==rule_id),None)

@@ -15,6 +15,7 @@ const labels = {
   CORRECTED: "corrected",
   AUTO_RESOLVED: "corrected",
   REJECTED: "rejected",
+  CORRECTION_REQUESTED: "correction-requested",
 };
 function App() {
   const [token, setToken] = useState(localStorage.getItem("token") || "");
@@ -120,7 +121,8 @@ function App() {
         {view === "dashboard" && (
           <Dashboard
             data={data}
-            api={api}
+            user={user}
+            onNavigate={setView}
             reload={() => {
               load("summary", "/summary");
               load("activity", "/dashboard/activity");
@@ -144,7 +146,7 @@ function App() {
             onBatch={() => setView("batches")}
           />
         )}{" "}
-        {view === "batches" && <BatchRecords api={api} setMessage={setMessage} />}{" "}
+        {view === "batches" && <BatchRecords api={api} user={user} setMessage={setMessage} />}{" "}
         {view === "exceptions" && (
           <Exceptions api={api} user={user} setMessage={setMessage} />
         )}{" "}
@@ -211,7 +213,7 @@ function Login({ api, onLogin }) {
     </div>
   );
 }
-function Dashboard({ data, reload }) {
+function Dashboard({ data, reload, user, onNavigate }) {
   const s = data.summary || {},
     a = data.activity || {},
     ai = data.aiStatus;
@@ -239,6 +241,7 @@ function Dashboard({ data, reload }) {
           </article>
         ))}
       </div>
+      <RoleWorkspace user={user} summary={s} activity={a} onNavigate={onNavigate} />
       <div className="dashboard-grid">
         <section className="panel">
           <h2>AI Review Assistant</h2>
@@ -313,6 +316,24 @@ function Dashboard({ data, reload }) {
       </section>
     </>
   );
+}
+function RoleWorkspace({ user, summary, activity, onNavigate }) {
+  const role = user.role;
+  if (role === "DATA_OPERATOR") return <section className="panel role-workspace">
+    <div><p className="eyebrow dark">DATA OPERATOR WORKSPACE</p><h2>Ingest and prepare source evidence</h2><p>Upload a loan tape or secondary source, review normalization outcomes, and hand exceptions to the review queue.</p></div>
+    <div className="role-metrics"><span><b>{activity.recent_uploads?.length || 0}</b> recent uploads</span><span><b>{summary.open_exceptions ?? 0}</b> records needing review</span></div>
+    <div className="actions"><button className="primary" onClick={() => onNavigate("upload")}>Upload source file</button><button className="secondary" onClick={() => onNavigate("batches")}>Inspect normalized batch</button></div>
+  </section>;
+  if (role === "DATA_CONSUMER") return <section className="panel role-workspace">
+    <div><p className="eyebrow dark">DATA CONSUMER WORKSPACE</p><h2>Use trusted, verified loan records</h2><p>Review immutable hashes, the current data-quality score, export verified data, and inspect each loan’s evidence trail.</p></div>
+    <div className="role-metrics"><span><b>{summary.verified_loans ?? 0}</b> verified records</span><span><b>{summary.quality_score ?? "—"}%</b> portfolio quality</span></div>
+    <div className="actions"><button className="primary" onClick={() => onNavigate("verified")}>Open verified records</button><button className="secondary" onClick={() => onNavigate("audit")}>Inspect audit trail</button></div>
+  </section>;
+  return <section className="panel role-workspace">
+    <div><p className="eyebrow dark">REVIEWER WORKBENCH</p><h2>Resolve exceptions with human control</h2><p>Claim work, compare source evidence, request corrections, and choose whether to use or reject an AI recommendation.</p></div>
+    <div className="role-metrics"><span><b>{summary.open_exceptions ?? 0}</b> pending decisions</span><span><b>{activity.severity_breakdown?.CORRECTION_REQUESTED || 0}</b> corrections requested</span></div>
+    <div className="actions"><button className="primary" onClick={() => onNavigate("exceptions")}>Open exception queue</button><button className="secondary" onClick={() => onNavigate("batches")}>AI batch workbench</button></div>
+  </section>;
 }
 function Upload({ api, onDone }) {
   const [file, setFile] = useState(),
@@ -421,9 +442,10 @@ function UploadSummary({ result, onNext, onBatch }) {
     </section>
   );
 }
-function BatchRecords({ api, setMessage }) {
-  const [uploads, setUploads] = useState([]), [uploadId, setUploadId] = useState(""), [result, setResult] = useState(null), [status, setStatus] = useState(""), [search, setSearch] = useState(""), [page, setPage] = useState(0), [busy, setBusy] = useState(false);
+function BatchRecords({ api, user, setMessage }) {
+  const [uploads, setUploads] = useState([]), [uploadId, setUploadId] = useState(""), [result, setResult] = useState(null), [status, setStatus] = useState(""), [search, setSearch] = useState(""), [page, setPage] = useState(0), [busy, setBusy] = useState(false), [batchExceptions, setBatchExceptions] = useState([]), [batchSummary, setBatchSummary] = useState(""), [ruleText, setRuleText] = useState(""), [ruleProposal, setRuleProposal] = useState(""), [aiBusy, setAiBusy] = useState(false);
   const limit = 8;
+  const canUseAi = user.role === "REVIEWER" || user.role === "ADMIN";
   const loadUploads = async () => {
     try { const rows = await api("/uploads"); setUploads(rows); if (!uploadId && rows[0]?._id) setUploadId(rows[0]._id); }
     catch (e) { setMessage(e.message); }
@@ -435,8 +457,28 @@ function BatchRecords({ api, setMessage }) {
     catch (e) { setMessage(e.message); }
     finally { setBusy(false); }
   };
+  const loadBatchExceptions = async () => {
+    if (!canUseAi || !uploadId) return;
+    try { setBatchExceptions(await api(`/uploads/${uploadId}/exceptions`)); }
+    catch (e) { setMessage(e.message); setBatchExceptions([]); }
+  };
+  const requestBatchSummary = async () => {
+    if (!batchExceptions.length) return setMessage("This batch has no open exceptions to summarize.");
+    setAiBusy(true);
+    try { const response = await api("/ai/batch-summary", { method: "POST", body: JSON.stringify({ exception_ids: batchExceptions.map((item) => item._id) }) }); setBatchSummary(response); }
+    catch (e) { setMessage(e.message); }
+    finally { setAiBusy(false); }
+  };
+  const requestRule = async () => {
+    if (ruleText.trim().length < 10) return setMessage("Describe the validation rule in at least 10 characters.");
+    setAiBusy(true);
+    try { const response = await api("/ai/generate-rule", { method: "POST", body: JSON.stringify({ description: ruleText }) }); setRuleProposal(response); }
+    catch (e) { setMessage(e.message); }
+    finally { setAiBusy(false); }
+  };
   useEffect(() => { loadUploads(); }, []);
   useEffect(() => { loadRecords(); }, [uploadId, status, search, page]);
+  useEffect(() => { loadBatchExceptions(); setBatchSummary(""); }, [uploadId, user.role]);
   return <section className="panel batch-records">
     <div className="row"><div><h2>Batch loan records</h2><p className="hint">Normalized records and their current workflow status.</p></div><button className="secondary" disabled={busy} onClick={loadRecords}>Refresh</button></div>
     <div className="batch-controls">
@@ -448,6 +490,12 @@ function BatchRecords({ api, setMessage }) {
     <div className="record-table"><div className="record-head"><span>Loan</span><span>Borrower</span><span>Status</span><span>Source row</span></div>{(result?.items || []).map((loan) => <div className="record-item" key={loan._id}><b>{loan.loan_id || "Missing loan ID"}</b><span>{loan.borrower_id || "—"}</span><span className={`status ${String(loan.aggregate_status || "NEEDS_REVIEW").toLowerCase()}`}>{String(loan.aggregate_status || "NEEDS_REVIEW").replaceAll("_", " ")}</span><span>#{loan.source_row_number || "—"}</span></div>)}</div>
     {result && !result.items?.length && <p className="hint">No records match this filter.</p>}
     <div className="pagination"><button className="secondary" disabled={page === 0 || busy} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page + 1}</span><button className="secondary" disabled={!result?.pagination?.has_more || busy} onClick={() => setPage((value) => value + 1)}>Next</button></div>
+    {canUseAi && <section className="ai-workbench">
+      <div><p className="eyebrow dark">REVIEWER-ONLY AI WORKBENCH</p><h3>Batch exception summary</h3><p className="hint">Summarize the {batchExceptions.length} open exceptions in this selected batch. AI only recommends; it cannot change records.</p><button className="primary" disabled={aiBusy || !batchExceptions.length} onClick={requestBatchSummary}>{aiBusy ? "Working…" : "Summarize open exceptions"}</button></div>
+      {batchSummary && <div className="ai-output"><small>AI batch summary · {batchSummary.model} · {batchSummary.created_at ? new Date(batchSummary.created_at).toLocaleString() : "just now"}</small><pre>{batchSummary.summary}</pre></div>}
+      <div className="rule-generator"><h3>Generate a proposed validation rule</h3><textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} placeholder="Example: Flag active loans whose last payment is more than 90 days old." /><button className="secondary" disabled={aiBusy} onClick={requestRule}>Generate rule and test outline</button></div>
+      {ruleProposal && <div className="ai-output"><small>AI rule proposal · {ruleProposal.model} · {ruleProposal.created_at ? new Date(ruleProposal.created_at).toLocaleString() : "just now"}</small><pre>{ruleProposal.proposal}</pre></div>}
+    </section>}
   </section>;
 }
 function Exceptions({ api, user, setMessage }) {
@@ -630,6 +678,22 @@ function Exceptions({ api, user, setMessage }) {
                   {ai.response?.suggested_field}:{" "}
                   <strong>{String(ai.response?.suggested_value)}</strong>
                 </p>
+                {ai.source_comparison?.length > 1 && (
+                  <div className="source-evidence">
+                    <b>Source evidence comparison</b>
+                    <div className="source-evidence-grid">
+                      {ai.source_comparison.map((source, index) => (
+                        <div key={`${source.source_type}-${index}`}>
+                          <small>{source.source_type} · row {source.source_row_number || "—"}</small>
+                          {Object.entries(source.values || {}).map(([field, value]) => <p key={field}><span>{field}</span>{String(value ?? "—")}</p>)}
+                          {source.last_updated_at && <small>Updated: {source.last_updated_at}</small>}
+                        </div>
+                      ))}
+                    </div>
+                    {ai.response?.recommended_source && <p><b>Recommended source:</b> {ai.response.recommended_source}</p>}
+                    {ai.response?.comparison_reasoning && <p>{ai.response.comparison_reasoning}</p>}
+                  </div>
+                )}
                 <small>
                   Confidence: {ai.response?.confidence} · AI cannot approve or
                   edit this record.
@@ -672,6 +736,17 @@ function Exceptions({ api, user, setMessage }) {
                   >
                     Reject
                   </button>
+                  <button
+                    onClick={async () => {
+                      const decision = await act(`/exceptions/${selected._id}/decision`, {
+                        decision: "REQUEST_CORRECTION",
+                        comment: "Correction requested from the source-data owner.",
+                      });
+                      if (decision) setHumanDecision(decision);
+                    }}
+                  >
+                    Request correction
+                  </button>
                   <div className="edit">
                     <input
                       value={editValue}
@@ -708,6 +783,8 @@ function Exceptions({ api, user, setMessage }) {
                     <p>
                       {humanDecision.decision === "REJECT"
                         ? "The reviewer rejected this exception."
+                        : humanDecision.decision === "REQUEST_CORRECTION"
+                          ? "The reviewer requested a correction from the source-data owner. Verification remains blocked until it is resolved."
                         : `${humanDecision.field} was set to ${String(humanDecision.final_value)} by the reviewer.`}
                     </p>
                     {humanDecision.post_edit_validation && (
