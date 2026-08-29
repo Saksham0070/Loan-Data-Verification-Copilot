@@ -8,29 +8,35 @@ export default function Sidebar({
   onLogout,
 }) {
   return (
-    <aside>
-      <div className="brand">
-        INTAIN <span>VERIFY</span>
+    <aside className="sidebar" aria-label="Application navigation">
+      <div className="sidebar-top">
+        <div className="brand">
+          INTAIN <span>VERIFY</span>
+        </div>
+        <p className="role">{user.role.replace("_", " ")}</p>
       </div>
-      <p className="role">{user.role.replace("_", " ")}</p>
-      {nav.map((item) => (
+      <nav className="sidebar-nav">
+        {nav.map((item) => (
+          <button
+            key={item}
+            className={view === item ? "nav active" : "nav"}
+            onClick={() => setView(item)}
+          >
+            {item}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebar-footer">
         <button
-          key={item}
-          className={view === item ? "nav active" : "nav"}
-          onClick={() => setView(item)}
+          className="nav"
+          onClick={() => window.open(`${apiUrl}/docs`, "_blank")}
         >
-          {item}
+          API Docs
         </button>
-      ))}
-      <button
-        className="nav"
-        onClick={() => window.open(`${apiUrl}/docs`, "_blank")}
-      >
-        API Docs
-      </button>
-      <button className="logout" onClick={onLogout}>
-        Sign out
-      </button>
+        <button className="logout" onClick={onLogout}>
+          Sign out
+        </button>
+      </div>
     </aside>
   );
 }

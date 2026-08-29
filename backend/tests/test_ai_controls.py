@@ -131,6 +131,18 @@ def test_ai_recommendation_is_logged_but_never_changes_loan(monkeypatch):
     assert generated["metadata"]["suggested_value"] == 750.0
 
 
+def test_ai_review_parser_strips_qwen_thinking_and_keeps_json_recommendation():
+    _, exception, _ = make_database()
+    response = workflow._parse_ai_review_response(
+        '<think>private reasoning</think>{"severity":"MEDIUM","explanation":"The balance needs review.","suggested_field":"current_balance","suggested_value":0,"confidence":"HIGH","reasoning":"A closed loan should not retain a balance."}',
+        exception,
+    )
+
+    assert response["suggested_field"] == "current_balance"
+    assert response["suggested_value"] == 0
+    assert "think" not in str(response).lower()
+
+
 def test_conflict_ai_review_stores_side_by_side_source_evidence(monkeypatch):
     db, exception, _ = make_database()
     exception["rule_id"] = "CONFLICTING_VALUES"
@@ -233,6 +245,7 @@ def test_verified_record_requires_clean_final_validation_and_is_created_once():
     with pytest.raises(HTTPException, match="already has a verified record"):
         workflow.verify(str(exception["_id"]), user, db)
 
+    exception["status"] = "OPEN"
     with pytest.raises(HTTPException, match="allowed field"):
         workflow.decide(
             str(exception["_id"]),
@@ -245,3 +258,30 @@ def test_verified_record_requires_clean_final_validation_and_is_created_once():
             user,
             db,
         )
+
+
+def test_resolved_exception_cannot_request_ai_or_receive_another_decision():
+    db, exception, _ = make_database()
+    exception["status"] = "AUTO_RESOLVED"
+    user = {"_id": ObjectId()}
+
+    with pytest.raises(HTTPException, match="active exception"):
+        workflow.ai_review(str(exception["_id"]), user, db)
+    with pytest.raises(HTTPException, match="resolved exception"):
+        workflow.decide(
+            str(exception["_id"]),
+            workflow.Decision(decision="REJECT", comment="This is already resolved."),
+            user,
+            db,
+        )
+
+
+def test_clean_loan_can_be_verified_without_an_exception():
+    db, _, loan = make_database()
+    user = {"_id": ObjectId()}
+
+    verified = workflow.verify_clean_loan("LN-AI-1", user, db)
+
+    assert verified["loan_id"] == "LN-AI-1"
+    assert verified["status"] == "VERIFIED"
+    assert db.loans.documents[0]["aggregate_status"] == "VERIFIED"

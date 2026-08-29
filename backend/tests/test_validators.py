@@ -1,6 +1,7 @@
 from app.validators import validate_loan
 from app.schemas import NormalizedLoanRecord,normalized_schema_errors
 from app.services import aggregate_status,canonical_hash,combined_validation_failures,normalize_with_lineage,quality_from_failures
+from app.routers.advanced import _structured_batch_summary,_structured_rule_proposal
 def loan(**changes):
     x={"loan_id":"LN-1","borrower_id":"BR-1","origination_date":"2024-01-01","maturity_date":"2028-01-01","original_principal":1000.0,"current_balance":800.0,"payment_status":"ACTIVE","borrower_state":"CA","document_status":"COMPLETE"};x.update(changes);return x
 def test_valid_loan_passes():assert not validate_loan(loan())
@@ -10,6 +11,9 @@ def test_closed_loan_positive_balance_detected():assert "CLOSED_LOAN_POSITIVE_BA
 def test_interest_rate_range_detected():assert "INTEREST_RATE_RANGE" in {x["rule_id"] for x in validate_loan(loan(interest_rate=101))}
 def test_duplicate_borrower_combination_detected():assert "SUSPICIOUS_DUPLICATE_BORROWER" in {x["rule_id"] for x in validate_loan(loan(),duplicate_borrower_record=True)}
 def test_inconsistent_delinquency_detected():assert "PAYMENT_STATUS_CONSISTENCY" in {x["rule_id"] for x in validate_loan(loan(payment_status="DELINQUENT",days_past_due=0))}
+def test_current_or_closed_loan_with_days_past_due_is_detected():
+    assert "PAYMENT_STATUS_CONSISTENCY" in {x["rule_id"] for x in validate_loan(loan(payment_status="CURRENT",days_past_due=3))}
+    assert "PAYMENT_STATUS_CONSISTENCY" in {x["rule_id"] for x in validate_loan(loan(payment_status="CLOSED",days_past_due=1))}
 def test_normalization_creates_canonical_values_and_preserves_lineage():
     raw={" Loan ID ":" ln-101 ","Borrower State":" ca ","Original Principal":"$100,000","Current Balance":"82,500","Interest Rate":"8.5%","Origination Date":"01/15/2024","Maturity Date":"2029-01-15","Payment Status":" active "}
     normalized,changes=normalize_with_lineage(raw)
@@ -46,3 +50,26 @@ def test_typed_normalized_schema_accepts_clean_canonical_record_and_reports_inva
     errors=normalized_schema_errors(loan(original_principal="not-a-number"))
     assert errors[0]["field"]=="original_principal"
     assert "NORMALIZED_SCHEMA_VALID" in {item["rule_id"] for item in combined_validation_failures(loan(original_principal="not-a-number"))}
+def test_batch_ai_summary_strips_thinking_and_returns_reviewer_structure():
+    exceptions=[{"loan_id":"LN-1","title":"Balance is too high","severity":"HIGH"}]
+    raw="<think>private model reasoning</think>{\"overall_assessment\":\"One balance issue needs attention.\",\"risk_level\":\"HIGH\",\"priority_actions\":[{\"priority\":1,\"action\":\"Review LN-1\",\"why\":\"The balance needs confirmation.\",\"affected_loan_ids\":[\"LN-1\"]}],\"issue_groups\":[{\"issue_type\":\"Balance check\",\"severity\":\"HIGH\",\"affected_loan_ids\":[\"LN-1\"],\"what_it_means\":\"The balance may be inaccurate.\",\"recommended_reviewer_action\":\"Compare the source values.\"}],\"reviewer_note\":\"Confirm the evidence first.\"}"
+    result=_structured_batch_summary(raw,exceptions)
+    assert result["overall_assessment"]=="One balance issue needs attention."
+    assert result["issue_groups"][0]["affected_loan_ids"]==["LN-1"]
+    assert "think" not in str(result).lower()
+def test_rule_ai_response_strips_thinking_and_handles_questions_without_a_rule():
+    raw="<think>private model reasoning</think>{\"plain_language_interpretation\":\"This is a question about an existing review instruction.\",\"is_rule_recommended\":false,\"recommended_next_step\":\"Open the exception and review its evidence.\",\"proposed_rule\":null,\"test_cases\":[],\"reviewer_note\":\"No system change is needed.\"}"
+    result=_structured_rule_proposal(raw,"Why does this loan need reviewer action?")
+    assert result["is_rule_recommended"] is False
+    assert result["proposed_rule"] is None
+    assert result["plain_language_interpretation"].startswith("This is a question")
+    assert "think" not in str(result).lower()
+def test_rule_fallback_recognizes_an_existing_closed_loan_balance_rule():
+    result=_structured_rule_proposal("<think>unstructured response</think>","Flag loans marked closed when their current balance is greater than zero.")
+    assert result["is_rule_recommended"] is False
+    assert result["existing_rule"]["rule_id"]=="CLOSED_LOAN_POSITIVE_BALANCE"
+    assert "already covered" in result["plain_language_interpretation"].lower()
+def test_rule_fallback_creates_a_useful_draft_for_an_unknown_flag_condition():
+    result=_structured_rule_proposal("not json","Flag loans with an unusual servicing reference format.")
+    assert result["is_rule_recommended"] is True
+    assert result["proposed_rule"]["rule_id"]=="PROPOSED_CUSTOM_RULE"

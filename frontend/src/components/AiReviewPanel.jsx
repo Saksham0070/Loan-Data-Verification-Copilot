@@ -34,9 +34,19 @@ export default function AiReviewPanel({ enabled, ai, busy, onRequest }) {
       <p>{ai.response?.explanation}</p>
       <div className="ai-suggestion">
         <b>Suggested correction</b>
-        <strong>
-          {ai.response?.suggested_field}: {String(ai.response?.suggested_value)}
-        </strong>
+        {ai.response?.suggested_field &&
+        ai.response?.suggested_value !== null &&
+        ai.response?.suggested_value !== undefined &&
+        ai.response?.suggested_value !== "" ? (
+          <strong>
+            {ai.response.suggested_field}: {String(ai.response.suggested_value)}
+          </strong>
+        ) : (
+          <strong>
+            No automatic correction suggested. Confirm the source evidence
+            before editing or requesting a correction.
+          </strong>
+        )}
       </div>
       <p className="reasoning">{ai.response?.reasoning}</p>
       <small>

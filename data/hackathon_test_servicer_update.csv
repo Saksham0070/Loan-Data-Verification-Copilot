@@ -1,0 +1,5 @@
+"loan_id","current_balance","payment_status","last_updated_at","source_system"
+"LN-30001","8300","ACTIVE","2026-08-28","SERVICER_PORTAL"
+"LN-30002","19000","DELINQUENT","2026-08-28","SERVICER_PORTAL"
+"LN-30015","0","PAID_OFF","2026-08-28","SERVICER_PORTAL"
+"LN-99999","5000","ACTIVE","2026-08-28","SERVICER_PORTAL"

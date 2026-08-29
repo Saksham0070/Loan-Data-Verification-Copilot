@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import AiReviewPanel from "./components/AiReviewPanel";
 import Sidebar from "./components/Sidebar";
 import { API_URL } from "./lib/api";
 import "./styles.css";
@@ -17,6 +16,14 @@ const labels = {
   REJECTED: "rejected",
   CORRECTION_REQUESTED: "correction-requested",
 };
+function hasSafeAiSuggestion(response) {
+  return Boolean(
+    response?.suggested_field &&
+      response.suggested_value !== null &&
+      response.suggested_value !== undefined &&
+      response.suggested_value !== "",
+  );
+}
 function App() {
   const [token, setToken] = useState(localStorage.getItem("token") || "");
   const [user, setUser] = useState(
@@ -97,7 +104,7 @@ function App() {
         apiUrl={API}
         onLogout={logout}
       />
-      <main>
+      <main className="content">
         <header>
           <div>
             <h1>
@@ -446,6 +453,10 @@ function BatchRecords({ api, user, setMessage }) {
   const [uploads, setUploads] = useState([]), [uploadId, setUploadId] = useState(""), [result, setResult] = useState(null), [status, setStatus] = useState(""), [search, setSearch] = useState(""), [page, setPage] = useState(0), [busy, setBusy] = useState(false), [batchExceptions, setBatchExceptions] = useState([]), [batchSummary, setBatchSummary] = useState(""), [ruleText, setRuleText] = useState(""), [ruleProposal, setRuleProposal] = useState(""), [aiBusy, setAiBusy] = useState(false);
   const limit = 8;
   const canUseAi = user.role === "REVIEWER" || user.role === "ADMIN";
+  const selectedUpload = uploads.find((upload) => upload._id === uploadId);
+  const isSecondaryUpload = ["SERVICER_UPDATE", "DOCUMENT_MANIFEST"].includes(selectedUpload?.source_type);
+  const isSourceEvidence = result?.record_kind === "SOURCE_EVIDENCE";
+
   const loadUploads = async () => {
     try { const rows = await api("/uploads"); setUploads(rows); if (!uploadId && rows[0]?._id) setUploadId(rows[0]._id); }
     catch (e) { setMessage(e.message); }
@@ -453,8 +464,12 @@ function BatchRecords({ api, user, setMessage }) {
   const loadRecords = async () => {
     if (!uploadId) return;
     setBusy(true);
-    try { const query = new URLSearchParams({ limit: String(limit), offset: String(page * limit) }); if (status) query.set("status", status); if (search) query.set("search", search); setResult(await api(`/uploads/${uploadId}/records?${query.toString()}`)); }
-    catch (e) { setMessage(e.message); }
+    try {
+      const query = new URLSearchParams({ limit: String(limit), offset: String(page * limit) });
+      if (status && !isSecondaryUpload) query.set("status", status);
+      if (search) query.set("search", search);
+      setResult(await api(`/uploads/${uploadId}/records?${query.toString()}`));
+    } catch (e) { setMessage(e.message); }
     finally { setBusy(false); }
   };
   const loadBatchExceptions = async () => {
@@ -465,37 +480,74 @@ function BatchRecords({ api, user, setMessage }) {
   const requestBatchSummary = async () => {
     if (!batchExceptions.length) return setMessage("This batch has no open exceptions to summarize.");
     setAiBusy(true);
-    try { const response = await api("/ai/batch-summary", { method: "POST", body: JSON.stringify({ exception_ids: batchExceptions.map((item) => item._id) }) }); setBatchSummary(response); }
+    try { setBatchSummary(await api("/ai/batch-summary", { method: "POST", body: JSON.stringify({ exception_ids: batchExceptions.map((item) => item._id) }) })); }
     catch (e) { setMessage(e.message); }
     finally { setAiBusy(false); }
   };
   const requestRule = async () => {
     if (ruleText.trim().length < 10) return setMessage("Describe the validation rule in at least 10 characters.");
     setAiBusy(true);
-    try { const response = await api("/ai/generate-rule", { method: "POST", body: JSON.stringify({ description: ruleText }) }); setRuleProposal(response); }
+    try { setRuleProposal(await api("/ai/generate-rule", { method: "POST", body: JSON.stringify({ description: ruleText }) })); }
     catch (e) { setMessage(e.message); }
     finally { setAiBusy(false); }
+  };
+  const verifyReadyLoan = async (loan) => {
+    setBusy(true);
+    try { await api(`/loans/${encodeURIComponent(loan.loan_id)}/verify`, { method: "POST" }); setMessage(`${loan.loan_id} is now verified. Open the Verified page to inspect or export it.`); await loadRecords(); }
+    catch (e) { setMessage(e.message); }
+    finally { setBusy(false); }
   };
   useEffect(() => { loadUploads(); }, []);
   useEffect(() => { loadRecords(); }, [uploadId, status, search, page]);
   useEffect(() => { loadBatchExceptions(); setBatchSummary(""); }, [uploadId, user.role]);
+
   return <section className="panel batch-records">
-    <div className="row"><div><h2>Batch loan records</h2><p className="hint">Normalized records and their current workflow status.</p></div><button className="secondary" disabled={busy} onClick={loadRecords}>Refresh</button></div>
+    <div className="row"><div><h2>{isSecondaryUpload ? "Batch source evidence" : "Batch loan records"}</h2><p className="hint">{isSecondaryUpload ? "Preserved supporting rows used for source comparison and conflict review." : "Normalized records and their current workflow status."}</p></div><button className="secondary" disabled={busy} onClick={loadRecords}>Refresh</button></div>
     <div className="batch-controls">
-      <select value={uploadId} onChange={(e) => { setUploadId(e.target.value); setPage(0); }}><option value="">Select an upload</option>{uploads.map((upload) => <option key={upload._id} value={upload._id}>{upload.filename} · {upload.rows_success}/{upload.rows_total} rows</option>)}</select>
-      <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}><option value="">All statuses</option><option value="READY_FOR_VERIFICATION">Ready for verification</option><option value="NEEDS_REVIEW">Needs review</option><option value="FAILED">Failed</option><option value="VERIFIED">Verified</option></select>
+      <select value={uploadId} onChange={(e) => { setUploadId(e.target.value); setStatus(""); setPage(0); }}><option value="">Select an upload</option>{uploads.map((upload) => <option key={upload._id} value={upload._id}>{upload.filename} · {upload.rows_success}/{upload.rows_total} rows</option>)}</select>
+      {!isSecondaryUpload && <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}><option value="">All statuses</option><option value="READY_FOR_VERIFICATION">Ready for verification</option><option value="NEEDS_REVIEW">Needs review</option><option value="FAILED">Failed</option><option value="VERIFIED">Verified</option></select>}
       <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(0); }} placeholder="Search loan or borrower ID" />
     </div>
-    {result?.upload && <p className="hint">{result.upload.filename} · {result.pagination.total} matching records</p>}
-    <div className="record-table"><div className="record-head"><span>Loan</span><span>Borrower</span><span>Status</span><span>Source row</span></div>{(result?.items || []).map((loan) => <div className="record-item" key={loan._id}><b>{loan.loan_id || "Missing loan ID"}</b><span>{loan.borrower_id || "—"}</span><span className={`status ${String(loan.aggregate_status || "NEEDS_REVIEW").toLowerCase()}`}>{String(loan.aggregate_status || "NEEDS_REVIEW").replaceAll("_", " ")}</span><span>#{loan.source_row_number || "—"}</span></div>)}</div>
+    {result?.upload && <p className="hint">{result.upload.filename} · {result.pagination.total} matching {isSourceEvidence ? "source-evidence" : "loan"} records</p>}
+    <div className="record-table">
+      {isSourceEvidence ? <><div className="record-head"><span>Loan</span><span>Source</span><span>Source row</span><span>Evidence values</span><span>Purpose</span></div>{(result?.items || []).map((source) => <div className="record-item" key={source._id}><b>{source.loan_id || "Missing loan ID"}</b><span>{source.source_type?.replaceAll("_", " ") || "Secondary source"}</span><span>#{source.source_row_number || "—"}</span><span><details><summary>View normalized evidence</summary><code className="source-json">{JSON.stringify(source.raw_row || {}, null, 2)}</code></details></span><span>Preserved for comparison</span></div>)}</> : <><div className="record-head"><span>Loan</span><span>Borrower</span><span>Status</span><span>Source row</span><span>Action</span></div>{(result?.items || []).map((loan) => <div className="record-item" key={loan._id}><b>{loan.loan_id || "Missing loan ID"}</b><span>{loan.borrower_id || "—"}</span><span className={`status ${String(loan.aggregate_status || "NEEDS_REVIEW").toLowerCase()}`}>{String(loan.aggregate_status || "NEEDS_REVIEW").replaceAll("_", " ")}</span><span>#{loan.source_row_number || "—"}</span><span>{canUseAi && loan.aggregate_status === "READY_FOR_VERIFICATION" ? <button className="verify-record" disabled={busy} onClick={() => verifyReadyLoan(loan)}>Verify</button> : "—"}</span></div>)}</>}
+    </div>
     {result && !result.items?.length && <p className="hint">No records match this filter.</p>}
     <div className="pagination"><button className="secondary" disabled={page === 0 || busy} onClick={() => setPage((value) => value - 1)}>Previous</button><span>Page {page + 1}</span><button className="secondary" disabled={!result?.pagination?.has_more || busy} onClick={() => setPage((value) => value + 1)}>Next</button></div>
-    {canUseAi && <section className="ai-workbench">
+    {canUseAi && !isSourceEvidence && <section className="ai-workbench">
       <div><p className="eyebrow dark">REVIEWER-ONLY AI WORKBENCH</p><h3>Batch exception summary</h3><p className="hint">Summarize the {batchExceptions.length} open exceptions in this selected batch. AI only recommends; it cannot change records.</p><button className="primary" disabled={aiBusy || !batchExceptions.length} onClick={requestBatchSummary}>{aiBusy ? "Working…" : "Summarize open exceptions"}</button></div>
-      {batchSummary && <div className="ai-output"><small>AI batch summary · {batchSummary.model} · {batchSummary.created_at ? new Date(batchSummary.created_at).toLocaleString() : "just now"}</small><pre>{batchSummary.summary}</pre></div>}
-      <div className="rule-generator"><h3>Generate a proposed validation rule</h3><textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} placeholder="Example: Flag active loans whose last payment is more than 90 days old." /><button className="secondary" disabled={aiBusy} onClick={requestRule}>Generate rule and test outline</button></div>
-      {ruleProposal && <div className="ai-output"><small>AI rule proposal · {ruleProposal.model} · {ruleProposal.created_at ? new Date(ruleProposal.created_at).toLocaleString() : "just now"}</small><pre>{ruleProposal.proposal}</pre></div>}
+      {batchSummary && <BatchSummary summary={batchSummary} />}
+      <div className="rule-generator"><h3>Ask about a validation rule</h3><p className="hint">Describe an issue you want the system to catch. You can also ask a question; AI will tell you whether a new rule is needed.</p><textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} placeholder="Example: Flag active loans whose last payment is more than 90 days old." /><div className="rule-examples"><span>Try an example:</span><button type="button" onClick={() => setRuleText("Flag active loans whose last payment is more than 90 days old.")}>Late payment</button><button type="button" onClick={() => setRuleText("Flag loans marked closed when their current balance is greater than zero.")}>Closed loan balance</button><button type="button" onClick={() => setRuleText("Why does this loan need reviewer action?")}>Ask a question</button></div><button className="secondary" disabled={aiBusy} onClick={requestRule}>Get structured guidance</button></div>
+      {ruleProposal && <RuleProposal proposal={ruleProposal} />}
     </section>}
+  </section>;
+}
+function BatchSummary({ summary }) {
+  const result = summary.summary || {};
+  return <section className="batch-summary-result" aria-live="polite">
+    <div className="summary-heading"><div><p className="eyebrow dark">AI REVIEW PLAN</p><h3>What needs attention</h3></div><span className={`risk ${String(result.risk_level || "MEDIUM").toLowerCase()}`}>{result.risk_level || "MEDIUM"} PRIORITY</span></div>
+    <p className="summary-overview">{result.overall_assessment}</p>
+    <div className="summary-meta">Generated by {summary.model} · {summary.created_at ? new Date(summary.created_at).toLocaleString() : "just now"} · {summary.exception_count} open issues reviewed</div>
+    <h4>Recommended review order</h4>
+    <div className="priority-actions">{(result.priority_actions || []).map((item, index) => <article key={`${item.action}-${index}`}><b>{item.priority || index + 1}</b><div><strong>{item.action}</strong><p>{item.why}</p>{item.affected_loan_ids?.length > 0 && <small>Affected loans: {item.affected_loan_ids.join(", ")}</small>}</div></article>)}</div>
+    <h4>Issue groups</h4>
+    <div className="issue-groups">{(result.issue_groups || []).map((group, index) => <article key={`${group.issue_type}-${index}`}><div className="issue-title"><strong>{group.issue_type}</strong><span className={`severity-pill ${String(group.severity || "MEDIUM").toLowerCase()}`}>{group.severity}</span></div><p>{group.what_it_means}</p><p><b>Reviewer action:</b> {group.recommended_reviewer_action}</p>{group.affected_loan_ids?.length > 0 && <small>{group.affected_loan_ids.length} loan{group.affected_loan_ids.length === 1 ? "" : "s"}: {group.affected_loan_ids.join(", ")}</small>}</article>)}</div>
+    <div className="human-control"><b>Reviewer reminder:</b> {result.reviewer_note}<br /><span>{result.human_control_notice}</span></div>
+  </section>;
+}
+function RuleProposal({ proposal }) {
+  const result = proposal.proposal || {};
+  const rule = result.proposed_rule;
+  const existing = result.existing_rule;
+  const heading = rule ? "Proposed validation rule" : existing ? "Already covered by an existing rule" : "Needs more detail";
+  const badge = rule ? "RULE PROPOSED" : existing ? "EXISTING RULE" : "CLARIFICATION";
+  return <section className="rule-proposal-result" aria-live="polite">
+    <div className="summary-heading"><div><p className="eyebrow dark">AI GUIDANCE</p><h3>{heading}</h3></div><span className={`recommendation ${rule ? "yes" : existing ? "covered" : "no"}`}>{badge}</span></div>
+    <p className="summary-overview">{result.plain_language_interpretation}</p>
+    <div className="summary-meta">Generated by {proposal.model} · {proposal.created_at ? new Date(proposal.created_at).toLocaleString() : "just now"}</div>
+    <div className="next-step"><b>Recommended next step:</b> {result.recommended_next_step}</div>
+    {(rule || existing) && <><div className="proposed-rule-card"><div><span>Rule name</span><strong>{(rule || existing).name}</strong></div><div><span>Severity</span><strong className={`severity-pill ${String((rule || existing).severity || "MEDIUM").toLowerCase()}`}>{(rule || existing).severity}</strong></div><div><span>{rule ? "Fields checked" : "Rule ID"}</span><strong>{rule ? rule.fields?.join(", ") || "Not specified" : existing.rule_id}</strong></div>{rule && <div><span>Condition</span><strong>{rule.condition}</strong></div>}<p>{(rule || existing).description}</p></div>{rule && <><h4>Suggested test cases</h4><div className="test-cases">{(result.test_cases || []).map((test, index) => <article key={`${test.scenario}-${index}`}><strong>{test.scenario}</strong><p><b>Example:</b> {test.sample_input}</p><p><b>Expected:</b> {test.expected_result}</p></article>)}</div></>}</>}
+    <div className="human-control"><b>Before implementation:</b> {result.reviewer_note}<br /><span>This is guidance only. It does not add a rule or change any loan record.</span></div>
   </section>;
 }
 function Exceptions({ api, user, setMessage }) {
@@ -569,6 +621,10 @@ function Exceptions({ api, user, setMessage }) {
   };
   const chosenField =
     ai?.response?.suggested_field || selected?.affected_fields?.[0] || "";
+  const safeAiSuggestion = hasSafeAiSuggestion(ai?.response);
+  const isActionable = ["OPEN", "UNDER_REVIEW", "CORRECTION_REQUESTED"].includes(
+    selected?.status,
+  );
   return (
     <div className="split">
       <section className="panel table">
@@ -649,7 +705,7 @@ function Exceptions({ api, user, setMessage }) {
                 </small>
               </details>
             )}
-            {user.role !== "DATA_OPERATOR" && (
+            {user.role !== "DATA_OPERATOR" && isActionable && (
               <div className="actions">
                 <button
                   className="secondary"
@@ -669,15 +725,30 @@ function Exceptions({ api, user, setMessage }) {
                 </button>
               </div>
             )}
+            {user.role !== "DATA_OPERATOR" && selected && !isActionable && (
+              <div className="human-control">
+                <b>This exception is resolved.</b> It remains visible as part of
+                the audit history; no further AI review or reviewer decision is
+                needed.
+              </div>
+            )}
             {ai && (
               <div className="ai">
                 <span>AI RECOMMENDATION · {ai.model}</span>
                 <p>{ai.response?.explanation}</p>
                 <b>Suggested correction</b>
-                <p>
-                  {ai.response?.suggested_field}:{" "}
-                  <strong>{String(ai.response?.suggested_value)}</strong>
-                </p>
+                {safeAiSuggestion ? (
+                  <p>
+                    {ai.response.suggested_field}:{" "}
+                    <strong>{String(ai.response.suggested_value)}</strong>
+                  </p>
+                ) : (
+                  <p>
+                    <strong>No automatic correction suggested.</strong> Confirm
+                    the source evidence, then edit the correct field or request
+                    a correction from the source-data owner.
+                  </p>
+                )}
                 {ai.source_comparison?.length > 1 && (
                   <div className="source-evidence">
                     <b>Source evidence comparison</b>
@@ -708,12 +779,12 @@ function Exceptions({ api, user, setMessage }) {
                 </details>
               </div>
             )}
-            {user.role !== "DATA_OPERATOR" && (
+            {user.role !== "DATA_OPERATOR" && isActionable && (
               <>
                 <div className="decision">
                   <h3>Human decision</h3>
                   <button
-                    disabled={!ai || busy}
+                    disabled={!ai || !safeAiSuggestion || busy}
                     onClick={async () => {
                       const decision = await act(`/exceptions/${selected._id}/decision`, {
                         decision: "ACCEPT",
