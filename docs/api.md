@@ -10,3 +10,6 @@
 | Decision | `POST /api/exceptions/{id}/decision`, `POST /api/exceptions/{id}/verify` |
 | Trust | `GET /api/audit/{loan_id}`, `GET /api/verified-records`, `GET /api/verified-records/export` |
 | Metrics | `GET /api/dashboard` |
+| Product feedback | `POST /api/feedback` |
+
+`POST /api/feedback` stores authenticated user feedback separately from loan records, validation results, and audit decisions.

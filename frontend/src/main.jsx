@@ -1,8 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Sidebar from "./components/Sidebar";
+import EveningLoginScene from "./components/EveningLoginScene";
+import FeedbackCat from "./components/FeedbackCat";
+import SpeedLoader from "./components/SpeedLoader";
 import { API_URL } from "./lib/api";
 import "./styles.css";
+import "./experience.css";
 
 const API = API_URL;
 const labels = {
@@ -24,6 +28,29 @@ function hasSafeAiSuggestion(response) {
       response.suggested_value !== "",
   );
 }
+function extractErrorText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(extractErrorText).filter(Boolean).join("; ");
+  if (value && typeof value === "object") {
+    if (typeof value.msg === "string") return value.msg;
+    for (const key of ["message", "error", "detail"]) {
+      const text = extractErrorText(value[key]);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+function getApiError(payload, status, path) {
+  if (status === 401) return path === "/auth/login" ? extractErrorText(payload) || "Incorrect email or password." : "Your session has expired. Please sign in again.";
+  if (status === 403) return "You do not have permission for this action.";
+  if (status === 404) return extractErrorText(payload) || "Requested data was not found.";
+  if (status === 409) return extractErrorText(payload) || "This action conflicts with existing data.";
+  if (status === 413) return "The selected file is too large.";
+  if (status === 422) return extractErrorText(payload?.detail) || "Please check the entered information.";
+  if (status === 429) return "Too many requests. Please wait and try again.";
+  if (status >= 500) return "The server could not complete the request. Please try again.";
+  return extractErrorText(payload) || "The request could not be completed.";
+}
 function App() {
   const [token, setToken] = useState(localStorage.getItem("token") || "");
   const [user, setUser] = useState(
@@ -33,25 +60,24 @@ function App() {
   const [message, setMessage] = useState("");
   const [data, setData] = useState({});
   const [uploadResult, setUploadResult] = useState(null);
+  const [signingOut, setSigningOut] = useState(false);
   const api = async (path, options = {}) => {
-    const res = await fetch(`${API}/api${path}`, {
-      ...options,
-      headers: {
-        ...(options.body instanceof FormData
-          ? {}
-          : { "Content-Type": "application/json" }),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    });
+    let res;
+    try {
+      res = await fetch(`${API}/api${path}`, {
+        ...options,
+        headers: {
+          ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+    } catch {
+      throw new Error("Cannot reach the server. Check your connection and try again.");
+    }
     const payload = await (res.headers.get("content-type")?.includes("json")
       ? res.json()
       : res.text());
-    if (!res.ok)
-      throw new Error(
-        typeof payload === "string"
-          ? payload
-          : payload.detail || "Request failed",
-      );
+    if (!res.ok) throw new Error(getApiError(payload, res.status, path));
     return payload;
   };
   const load = async (name, path) => {
@@ -70,11 +96,16 @@ function App() {
     }
   }, [token]);
   const logout = () => {
-    localStorage.clear();
-    setToken("");
-    setUser(null);
-    setData({});
-    setView("dashboard");
+    if (signingOut) return;
+    setSigningOut(true);
+    window.setTimeout(() => {
+      localStorage.clear();
+      setToken("");
+      setUser(null);
+      setData({});
+      setView("dashboard");
+      setSigningOut(false);
+    }, 450);
   };
   if (!token || !user)
     return (
@@ -103,7 +134,10 @@ function App() {
         setView={setView}
         apiUrl={API}
         onLogout={logout}
+        signingOut={signingOut}
       />
+      {signingOut && <SpeedLoader />}
+      <FeedbackCat api={api} />
       <main className="content">
         <header>
           <div>
@@ -167,10 +201,18 @@ function App() {
 }
 function Login({ api, onLogin }) {
   const [email, setEmail] = useState("operator@demo.local"),
-    [password, setPassword] = useState("DemoPass123!"),
-    [error, setError] = useState("");
+    [password, setPassword] = useState(""),
+    [error, setError] = useState(""),
+    [loading, setLoading] = useState(false);
   const submit = async (e) => {
     e.preventDefault();
+    if (loading) return;
+    setError("");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    setLoading(true);
     try {
       onLogin(
         await api("/auth/login", {
@@ -180,43 +222,45 @@ function Login({ api, onLogin }) {
       );
     } catch (e) {
       setError(e.message);
+    } finally {
+      setLoading(false);
     }
   };
   return (
     <div className="login">
-      <section>
-        <span className="eyebrow">INTAIN CAMPUS FINTECH CHALLENGE</span>
-        <h1>
-          Loan Data
-          <br />
-          <em>Verification Copilot</em>
-        </h1>
-        <p>
-          Turn messy loan tapes into reviewable, AI-assisted, human-approved
-          verified records.
-        </p>
+      <section className="login-intro">
+        <EveningLoginScene />
+        <div className="login-intro-copy">
+          <h1>Loan Data<br /><em>Verification Copilot</em></h1>
+          <p>Turn messy loan tapes into reviewable, AI-assisted, human-approved verified records.</p>
+        </div>
       </section>
-      <form onSubmit={submit}>
+      <form className="login-card" onSubmit={submit} aria-busy={loading}>
         <h2>Welcome back</h2>
         <p>Use a seeded demo account to begin.</p>
         <label>
           Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input type="email" autoComplete="username" required disabled={loading} value={email} onChange={(e) => setEmail(e.target.value)} />
         </label>
         <label>
           Password
           <input
             type="password"
+            autoComplete="current-password"
+            required
+            minLength={8}
+            disabled={loading}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
         </label>
-        {error && <small className="error">{error}</small>}
-        <button className="primary">Sign in</button>
+        {error && <small className="error" role="alert">{error}</small>}
+        <button className="primary login-submit" disabled={loading}>{loading ? "Please wait…" : "Sign in"}</button>
         <small>
           Operator: upload · Reviewer: resolve · Consumer: verify/export
         </small>
       </form>
+      {loading && <SpeedLoader message="Verifying secure access…" />}
     </div>
   );
 }
@@ -653,7 +697,7 @@ function Exceptions({ api, user, setMessage }) {
               <small>{r.title}</small>
             </span>
             <i className={labels[r.severity]}>{r.severity}</i>
-            <em className={labels[r.status]}>{r.status}</em>
+            <em className={labels[r.status]}>{r.status.replaceAll("_", " ")}</em>
           </button>
         ))}
         {!rows.length && <p>No exceptions match this filter.</p>}
